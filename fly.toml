@@ -1,0 +1,36 @@
+app = "orchet-voice"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  ORCHET_VOICE_ENV = "production"
+
+[[services]]
+  internal_port = 8080
+  protocol = "tcp"
+  auto_stop_machines = "off"
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+  [[services.tcp_checks]]
+    grace_period = "10s"
+    interval = "15s"
+    timeout = "2s"
+
+  [[services.http_checks]]
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    method = "GET"
+
+[deploy]
+  strategy = "rolling"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "1gb"

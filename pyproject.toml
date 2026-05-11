@@ -1,0 +1,53 @@
+[project]
+name = "orchet-voice"
+version = "0.1.0"
+description = "Real-time WebRTC voice agent service for Orchet."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pipecat-ai==0.0.61",
+  "pipecat-ai[daily]==0.0.61",
+  "pipecat-ai[deepgram]==0.0.61",
+  "pipecat-ai[groq]==0.0.61",
+  "pipecat-ai[anthropic]==0.0.61",
+  "supabase>=2.9",
+  "opentelemetry-api>=1.27",
+  "opentelemetry-sdk>=1.27",
+  "opentelemetry-instrumentation-fastapi>=0.48",
+  "opentelemetry-exporter-otlp-proto-http>=1.27",
+  "structlog>=24.4",
+  "httpx>=0.28",
+  "pydantic>=2.9",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.7",
+  "pyright>=1.1",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+reportMissingTypeStubs = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownVariableType = false
