@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -16,6 +16,8 @@ class VoiceConnectRequest(BaseModel):
     voice_session_id: str | None = Field(default=None, min_length=1, max_length=128)
     client_kind: Literal["web", "ios"] = "web"
     ttl_seconds: int = Field(default=600, ge=60, le=1800)
+    agent_id: str = Field(default="orchet-super-agent", min_length=1, max_length=128)
+    agent_manifest: dict[str, Any] | None = None
 
 
 class VoiceConnectResponse(BaseModel):
@@ -52,6 +54,8 @@ async def create_debug_voice_session(
             requested_session_id=payload.voice_session_id,
             client_kind=payload.client_kind,
             ttl_seconds=payload.ttl_seconds,
+            agent_id=payload.agent_id,
+            agent_manifest=payload.agent_manifest,
         )
     except Exception as exc:
         raise HTTPException(

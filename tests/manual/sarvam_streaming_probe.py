@@ -31,6 +31,7 @@ async def main() -> None:
     parser.add_argument("--all", action="store_true", help="Probe hi-IN, te-IN, and ta-IN.")
     parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE)
     parser.add_argument("--tts-model", default=DEFAULT_TTS_MODEL)
+    parser.add_argument("--region", default=os.environ.get("FLY_REGION", "local"))
     args = parser.parse_args()
 
     api_key = os.environ.get("SARVAM_API_KEY")
@@ -47,6 +48,7 @@ async def main() -> None:
             text=text,
             sample_rate=args.sample_rate,
             tts_model=args.tts_model,
+            region=args.region,
         )
         rows.append(row)
         print("ROW_JSON " + json.dumps(row, ensure_ascii=False), flush=True)
@@ -56,6 +58,7 @@ async def main() -> None:
         "stt_first_partial_p50_ms": statistics.median(
             [row["stt_first_partial_ms"] for row in rows]
         ),
+        "region": args.region,
         "rows": rows,
     }
     print("SUMMARY_JSON " + json.dumps(summary, ensure_ascii=False), flush=True)
@@ -68,6 +71,7 @@ async def probe_language(
     text: str,
     sample_rate: int,
     tts_model: str,
+    region: str,
 ) -> dict[str, object]:
     tts_result = await probe_tts(
         api_key=api_key,
@@ -83,6 +87,7 @@ async def probe_language(
         sample_rate=sample_rate,
     )
     return {
+        "region": region,
         "language": language,
         "tts_model": tts_model,
         "tts_first_chunk_ms": tts_result["first_chunk_ms"],
