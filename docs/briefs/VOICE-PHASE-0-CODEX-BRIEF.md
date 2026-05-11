@@ -194,7 +194,7 @@ Before opening any PR:
 - [ ] No provider keys logged (audit `console.log`, `logger.info`, `print` etc near new instrumentation)
 - [ ] Spans use exact names from the table above (no abbreviation / no rename)
 - [ ] Each span has appropriate attributes set (at minimum: `user.id` hashed or omitted per PII policy, `agent.id`, `session.id`, `client.kind`, `region` where applicable)
-- [ ] `voice.total.mouth_to_ear` parent span is correctly correlated with backend child spans via `traceparent` propagation
+- [ ] `voice.total.mouth_to_ear` is correlated with backend spans either through `traceparent` propagation or through `voice.session_id` + `voice.turn_id` attributes (whichever is already available — adding `traceparent` propagation is out of scope for this brief)
 
 After the PRs land but before reporting completion:
 
