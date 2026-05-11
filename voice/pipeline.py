@@ -10,6 +10,7 @@ from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode
 from pipecat.frames.frames import (
     Frame,
+    InputAudioRawFrame,
     InterimTranscriptionFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -28,6 +29,7 @@ from pipecat.frames.frames import (
 from pipecat.metrics.metrics import LLMUsageMetricsData
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
+from voice.obs.cost import VoiceSessionCostTracker
 from voice.obs.tracing import get_tracer
 
 STT_STREAM_SPAN_NAME = "voice.stt.stream"
@@ -50,6 +52,7 @@ class VoiceMetadata:
     region: str = "iad"
     locale: str = "unknown"
     agent_id: str = "orchet-super-agent"
+    llm_provider: str = "groq"
     llm_model: str = "llama-3.3-70b-versatile"
     tts_voice_id: str = "aura-2-andromeda-en"
 
@@ -329,6 +332,24 @@ class ClientVADInterruptionProcessor(FrameProcessor):
         await self.push_frame(frame, direction)
 
 
+class AudioDurationCostProcessor(FrameProcessor):
+    def __init__(self, cost_tracker: VoiceSessionCostTracker):
+        super().__init__(name="orchet-audio-duration-cost")
+        self._cost_tracker = cost_tracker
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, InputAudioRawFrame):
+            self._cost_tracker.record_input_audio_frame(
+                byte_count=len(frame.audio),
+                sample_rate=frame.sample_rate,
+                num_channels=frame.num_channels,
+            )
+
+        await self.push_frame(frame, direction)
+
+
 class STTSpanProcessor(FrameProcessor):
     def __init__(self, tracker: VoiceTurnTracker):
         super().__init__(name="orchet-stt-span")
@@ -386,10 +407,12 @@ class LLMSpanProcessor(FrameProcessor):
         self,
         tracker: VoiceTurnTracker,
         metadata: VoiceMetadata,
+        cost_tracker: VoiceSessionCostTracker | None = None,
     ):
         super().__init__(name="orchet-llm-span")
         self._tracker = tracker
         self._metadata = metadata
+        self._cost_tracker = cost_tracker
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -413,7 +436,7 @@ class LLMSpanProcessor(FrameProcessor):
         turn.assistant_text = ""
         turn.llm_tokens_out = 0
         turn.llm_span = self._tracker.start_stage_span(LLM_STREAM_SPAN_NAME)
-        turn.llm_span.set_attribute("voice.llm.provider", "groq")
+        turn.llm_span.set_attribute("voice.llm.provider", self._metadata.llm_provider)
         turn.llm_span.set_attribute("voice.llm.model", self._metadata.llm_model)
 
     def _handle_llm_text(self, frame: LLMTextFrame) -> None:
@@ -441,8 +464,10 @@ class LLMSpanProcessor(FrameProcessor):
             turn.llm_tokens_out = _estimate_tokens(turn.assistant_text)
         turn.llm_span.set_attribute("voice.llm.ttft_ms", turn.timing.llm_ttft_ms or 0)
         turn.llm_span.set_attribute("voice.llm.total_tokens_out", turn.llm_tokens_out)
-        turn.llm_span.set_attribute("voice.llm.provider", "groq")
+        turn.llm_span.set_attribute("voice.llm.provider", self._metadata.llm_provider)
         turn.llm_span.set_attribute("voice.llm.model", self._metadata.llm_model)
+        if self._cost_tracker:
+            self._cost_tracker.record_llm_tokens_out(turn.llm_tokens_out)
         turn.llm_span.end()
 
 
@@ -451,10 +476,12 @@ class TTSSpanProcessor(FrameProcessor):
         self,
         tracker: VoiceTurnTracker,
         metadata: VoiceMetadata,
+        cost_tracker: VoiceSessionCostTracker | None = None,
     ):
         super().__init__(name="orchet-tts-span")
         self._tracker = tracker
         self._metadata = metadata
+        self._cost_tracker = cost_tracker
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -464,7 +491,7 @@ class TTSSpanProcessor(FrameProcessor):
         elif isinstance(frame, TTSStartedFrame):
             self._handle_tts_start()
         elif isinstance(frame, TTSAudioRawFrame):
-            self._handle_tts_audio()
+            self._handle_tts_audio(frame)
         elif isinstance(frame, TTSTextFrame):
             self._handle_tts_text(frame)
         elif isinstance(frame, LLMFullResponseEndFrame):
@@ -480,10 +507,16 @@ class TTSSpanProcessor(FrameProcessor):
             turn.tts_span.set_attribute("voice.tts.provider", self._tracker.tts_provider)
             turn.tts_span.set_attribute("voice.tts.voice_id", self._tracker.tts_voice_id)
 
-    def _handle_tts_audio(self) -> None:
+    def _handle_tts_audio(self, frame: TTSAudioRawFrame) -> None:
         turn = self._tracker.ensure_turn()
         if not turn.tts_span or not turn.tts_span.is_recording():
             self._handle_tts_start()
+        if self._cost_tracker:
+            self._cost_tracker.record_output_audio_frame(
+                byte_count=len(frame.audio),
+                sample_rate=frame.sample_rate,
+                num_channels=frame.num_channels,
+            )
         if turn.timing.tts_first_chunk_ms is None:
             turn.timing.tts_first_chunk_ms = _elapsed_ms(turn.tts_started_at or turn.started_at)
             self._tracker.finish_total_span()
@@ -501,6 +534,8 @@ class TTSSpanProcessor(FrameProcessor):
         turn.tts_span.set_attribute("voice.tts.total_chars", turn.tts_total_chars)
         turn.tts_span.set_attribute("voice.tts.provider", self._tracker.tts_provider)
         turn.tts_span.set_attribute("voice.tts.voice_id", self._tracker.tts_voice_id)
+        if self._cost_tracker:
+            self._cost_tracker.record_tts_chars(turn.tts_total_chars)
         turn.tts_span.end()
 
 

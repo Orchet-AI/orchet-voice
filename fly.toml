@@ -1,4 +1,6 @@
 app = "orchet-voice"
+# Phase 5 production regions are provisioned as Fly Machines in
+# iad/fra/sin/bom. Keep iad as the app control-plane primary.
 primary_region = "iad"
 
 [build]

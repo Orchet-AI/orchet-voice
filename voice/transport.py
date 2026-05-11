@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 from uuid import uuid4
 
@@ -18,12 +18,13 @@ from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
-from pipecat.services.groq import GroqLLMService
-from pipecat.services.openai import BaseOpenAILLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
 from voice.auth import AuthenticatedUser
+from voice.obs.cost import VoiceSessionCostTracker, set_cost_span_attributes
+from voice.obs.tracing import get_tracer
 from voice.pipeline import (
+    AudioDurationCostProcessor,
     ClientVADInterruptionProcessor,
     LLMSpanProcessor,
     STTSpanProcessor,
@@ -42,6 +43,12 @@ from voice.routing.language_router import (
     sarvam_locale_for,
     stt_gate_types,
     tts_gate_types,
+)
+from voice.routing.llm_router import (
+    agent_manifest_for,
+    llm_model_for,
+    llm_provider_for,
+    pick_llm_service,
 )
 from voice.settings import Settings
 from voice.tool_catalog import VOICE_FUNCTION_SCHEMAS, VOICE_TOOLS_SCHEMA
@@ -143,6 +150,8 @@ class VoiceSessionManager:
         requested_session_id: str | None,
         client_kind: str,
         ttl_seconds: int,
+        agent_id: str = "orchet-super-agent",
+        agent_manifest: dict[str, Any] | None = None,
     ) -> VoiceSession:
         self._validate_provider_settings()
 
@@ -170,6 +179,7 @@ class VoiceSessionManager:
             user_id=user.user_id,
             client_kind=client_kind,
             region=self._settings.region,
+            agent_id=agent_id,
             llm_model=self._settings.voice_llm_model,
             tts_voice_id=self._settings.voice_tts_voice,
         )
@@ -179,6 +189,7 @@ class VoiceSessionManager:
                 bot_token=bot_token,
                 settings=self._settings,
                 metadata=metadata,
+                agent_manifest=agent_manifest,
             ),
             name=f"daily-voice-{session_id}",
         )
@@ -244,8 +255,24 @@ async def run_daily_voice_pipeline(
     bot_token: str,
     settings: Settings,
     metadata: VoiceMetadata,
+    agent_manifest: dict[str, Any] | None = None,
 ) -> None:
+    resolved_manifest = agent_manifest_for(
+        agent_id=metadata.agent_id,
+        provided_manifest=agent_manifest,
+    )
+    llm = pick_llm_service(agent_manifest=resolved_manifest, settings=settings)
+    llm_provider = llm_provider_for(llm)
+    llm_model = llm_model_for(llm, fallback=settings.voice_llm_model)
+    metadata = replace(metadata, llm_provider=llm_provider, llm_model=llm_model)
     tracker = VoiceTurnTracker(metadata)
+    cost_tracker = VoiceSessionCostTracker(llm_provider=llm_provider)
+    session_span = get_tracer().start_span("voice.session")
+    session_span.set_attribute("voice.session_id", metadata.voice_session_id)
+    session_span.set_attribute("voice.agent_id", metadata.agent_id)
+    session_span.set_attribute("voice.llm.provider", metadata.llm_provider)
+    session_span.set_attribute("voice.llm.model", metadata.llm_model)
+    session_span.set_attribute("fly.region", metadata.region)
     dispatcher = VoiceTurnDispatcher(
         gateway_url=settings.gateway_url,
         internal_token=settings.internal_token,
@@ -321,14 +348,6 @@ async def run_daily_voice_pipeline(
             sarvam_stt,
         ],
     )
-    llm = GroqLLMService(
-        api_key=settings.groq_api_key,
-        model=settings.voice_llm_model,
-        params=BaseOpenAILLMService.InputParams(
-            max_tokens=settings.voice_llm_max_tokens,
-            temperature=settings.voice_llm_temperature,
-        ),
-    )
     deepgram_tts = DeepgramTTSService(
         api_key=settings.lumo_deepgram_api_key,
         voice=settings.voice_tts_voice,
@@ -368,7 +387,7 @@ async def run_daily_voice_pipeline(
         ],
     )
     transport_output = transport.output()
-    _register_voice_tools(llm, dispatcher, transport_output)
+    register_voice_tools(llm, dispatcher, transport_output)
 
     context = OpenAILLMContext.from_messages(
         [{"role": "system", "content": load_voice_prompt(metadata.locale)}]
@@ -383,6 +402,7 @@ async def run_daily_voice_pipeline(
     pipeline = Pipeline(
         [
             transport.input(),
+            AudioDurationCostProcessor(cost_tracker),
             ClientVADInterruptionProcessor(tracker, dispatcher),
             language_router,
             stt,
@@ -390,9 +410,9 @@ async def run_daily_voice_pipeline(
             LanguagePromptProcessor(tracker=tracker, context=context),
             context_aggregator.user(),
             llm,
-            LLMSpanProcessor(tracker, metadata),
+            LLMSpanProcessor(tracker, metadata, cost_tracker),
             tts,
-            TTSSpanProcessor(tracker, metadata),
+            TTSSpanProcessor(tracker, metadata, cost_tracker),
             transport_output,
             context_aggregator.assistant(),
         ]
@@ -412,12 +432,25 @@ async def run_daily_voice_pipeline(
     try:
         await runner.run(task)
     finally:
+        estimate = cost_tracker.estimate(
+            stt_provider=tracker.stt_provider,
+            tts_provider=tracker.tts_provider,
+        )
+        set_cost_span_attributes(
+            session_span,
+            estimate=estimate,
+            llm_provider=metadata.llm_provider,
+            stt_provider=tracker.stt_provider,
+            tts_provider=tracker.tts_provider,
+            locale=tracker.locale,
+        )
+        session_span.end()
         await dispatcher.aclose()
 
 
-def _register_voice_tools(
-    llm: GroqLLMService,
-    dispatcher: VoiceTurnDispatcher,
+def register_voice_tools(
+    llm: Any,
+    dispatcher: Any,
     transport_output: object,
 ) -> None:
     async def handler(

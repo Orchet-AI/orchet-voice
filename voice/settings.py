@@ -21,6 +21,7 @@ class Settings:
     sarvam_api_key: str
     groq_api_key: str
     anthropic_api_key: str
+    openai_api_key: str
     otel_endpoint: str
     otel_headers: str
     honeycomb_api_key: str
@@ -30,6 +31,8 @@ class Settings:
     voice_sarvam_stt_model: str
     voice_language_detection_seconds: float
     voice_llm_model: str
+    voice_anthropic_model: str
+    voice_openai_model: str
     voice_llm_max_tokens: int
     voice_llm_temperature: float
     voice_tts_voice: str
@@ -54,6 +57,7 @@ class Settings:
             sarvam_api_key=os.getenv("SARVAM_API_KEY", ""),
             groq_api_key=os.getenv("GROQ_API_KEY", ""),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+            openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             otel_endpoint=os.getenv("LUMO_OTEL_ENDPOINT", ""),
             otel_headers=os.getenv("LUMO_OTEL_HEADERS", ""),
             honeycomb_api_key=os.getenv("ORCHET_HONEYCOMB_API_KEY", ""),
@@ -65,6 +69,8 @@ class Settings:
                 "ORCHET_VOICE_LANGUAGE_DETECTION_SECONDS", 2.0
             ),
             voice_llm_model=os.getenv("ORCHET_VOICE_LLM_MODEL", "llama-3.3-70b-versatile"),
+            voice_anthropic_model=os.getenv("ORCHET_VOICE_ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+            voice_openai_model=os.getenv("ORCHET_VOICE_OPENAI_MODEL", "gpt-4o-mini"),
             voice_llm_max_tokens=_int_env("ORCHET_VOICE_LLM_MAX_TOKENS", 250),
             voice_llm_temperature=_float_env("ORCHET_VOICE_LLM_TEMPERATURE", 0.7),
             voice_tts_voice=os.getenv("ORCHET_VOICE_TTS_VOICE", "aura-2-andromeda-en"),
