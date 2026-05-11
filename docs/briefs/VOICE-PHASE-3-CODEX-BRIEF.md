@@ -4,7 +4,7 @@
 **Parent ADR:** [VOICE-ARCHITECTURE-1 v6](../architecture/VOICE-ARCHITECTURE-1.md)
 **Contract proposal:** [voice-turn-contract-proposal.md](../voice-turn-contract-proposal.md)
 **Predecessors:** VOICE-PHASE-1-CODEX + VOICE-PHASE-2-CODEX (both must be merged)
-**Status:** Drafted — dispatches after Phase 2 merges
+**Status:** Drafted — dispatches after Phase 2 merges. **Amended 2026-05-11** after Phase 2 merge + production-wiring audit (see "Amendment 1" at the bottom of this brief).
 **Owner:** Codex
 **Reviewer:** Kalas (CEO/CTO) + Claude
 **Estimated effort:** 5 days
@@ -235,3 +235,71 @@ After Phase 3 closes, voice is a real safety-bounded agent. Phase 4 (Sarvam Indi
 - [voice-turn-contract-proposal.md](../voice-turn-contract-proposal.md) — full API contract, this brief implements it
 - [VOICE-PHASE-2-CODEX-BRIEF.md](./VOICE-PHASE-2-CODEX-BRIEF.md) — predecessor; must be merged first
 - [Pipecat 0.0.61 LLM service callbacks](https://github.com/pipecat-ai/pipecat) — for the function-call frame interception
+
+---
+
+## Amendment 1 — 2026-05-11 (post-Phase-2-merge production-wiring audit)
+
+This amendment fixes three errors and one omission in the original brief that the Phase 2 PR #7 review and a production-wiring audit surfaced.
+
+### Why an amendment exists
+
+After Phase 2 merged, an audit of `orchet-web`, `orchet-backend`, and `orchet-ios` confirmed that **no production client talks to `orchet-voice.fly.dev` today**. Every voice user is still hitting the Phase 0 batch path (`apps/web/components/VoiceMode.tsx` + `lib/streaming-audio.ts` → backend gateway `/stt` and `/tts`). The original Phase 3 brief framed Phase 3 as "orchestrator integration + confirmation modal," but that scope ships orchestrator routes that nothing calls. Phase 3 must also include the client cutover.
+
+### Correction 1 — persistence model (PR 1 + PR 2)
+
+The original brief is silent on persistence. Phase 2 shipped `voice/persistence.py` with a fire-and-forget POST to `/sessions/{session_id}/messages` (gated off via `voice_persistence_enabled=False` because that route doesn't exist on the orchestrator — only `GET /history/sessions/:id/messages` for replay).
+
+**Phase 3's persistence model:**
+
+- Voice service stops persisting transcripts. Delete `voice/persistence.py`, the `DeferredTranscriptPersistence` references in `voice/pipeline.py::TTSSpanProcessor`, and the `ORCHET_VOICE_PERSISTENCE_ENABLED` setting. The Fly secret can also be retired.
+- **The orchestrator persists** when it handles `POST /voice/turn`. It writes `request` (user transcript) and `response` (assistant text) rows to the append-only `events` table, mirroring the chat tool loop. No new "messages append" route. The orchestrator already owns this persistence pattern for text chat — Phase 3 reuses it.
+- **Interrupted turns must persist too.** Phase 2's `TTSSpanProcessor._handle_tts_end` was the only persistence call site, and it never fires on barge-in (LLMFullResponseEndFrame doesn't arrive when interrupt preempts). Phase 3 must explicitly call the orchestrator with the user transcript + the partial assistant text up to the cancel point, otherwise barge-in turns vanish from history. Concretely: when `interrupt_active_spans` fires, POST a `voice_turn` event to the orchestrator with `interrupted=true`, `user_text=<full transcript>`, `assistant_partial_text=<chars emitted before cancel>`, `cancel_at_ms=voice.tts.barge_in_ms`. The orchestrator persists both rows; the assistant row carries a `voice.interrupted=true` event attribute.
+- **Span ↔ row correlation.** Every event row the orchestrator writes for a voice turn must carry `voice.session_id` + `voice.turn_id` as event metadata so Honeycomb spans (which already carry both) join cleanly to conversation history.
+
+### Correction 2 — orchet-web PR 3 scope widening: actual cutover, not just modal
+
+The original PR 3 covered only `<VoiceConfirmationModal>` + WebRTC data-channel listener. That alone doesn't move a single user to the new pipeline — `components/VoiceMode.tsx` and `lib/streaming-audio.ts` still capture and upload audio to the batch path.
+
+**PR 3 must additionally include:**
+
+- Rewrite `components/VoiceMode.tsx` so that when "streaming voice" is enabled, it opens a Daily WebRTC call against `orchet-voice.fly.dev` (call the new service's `/debug/echo` endpoint — name aside, this is the session-create handshake — pass the Supabase access token in `Authorization: Bearer …`). Use `@daily-co/daily-js` (already on the Phase 2 smoke client; lift the patterns from `tests/smoke/web-client.html` in `orchet-voice`).
+- Rewrite or retire `lib/streaming-audio.ts` so that the capture-and-upload path is only invoked when the streaming-voice flag is off. Do not delete the file outright — it still serves iOS users via the gateway proxy (see Correction 3 below).
+- Wire Silero VAD on the client via `@ricky0123/vad-web@0.0.22` + `onnxruntime-web@1.19.2` (same versions Phase 2 uses) so the user's `barge_in` Daily app messages reach the voice service.
+- **Feature flag for gradual rollout:** new env var `NEXT_PUBLIC_VOICE_MODE_BACKEND` with values `streaming` (new path) and `batch` (Phase 0 path). Default `batch` in production; we flip to `streaming` after Honeycomb shows the new pipeline holding < 1s p50 for 24h. Read once at app boot; expose via a single `useVoiceBackend()` hook so every voice-related component branches off one source of truth.
+- Voice service URL: new env var `NEXT_PUBLIC_VOICE_SERVICE_URL` (default `https://orchet-voice.fly.dev`).
+
+Update PR 3's verification checklist:
+- Add: `npm run test` covers `VoiceMode.tsx` with both feature-flag values.
+- Add: a Playwright (or equivalent) smoke that swaps to `streaming`, opens the modal on a high-risk action, taps Confirm, and asserts the orchestrator received the confirmation POST.
+
+### Correction 3 — iOS scope, explicitly
+
+The original brief says "Touch iOS code (Phase 6 — WebRTC confirmation modal on iOS is a separate task)" under MUST NOT. Reaffirmed and made concrete:
+
+- `orchet-ios` stays on the Phase 0 batch path for all of Phase 3.
+- The gateway routes `/stt` and `/tts` on `orchet-backend` must NOT be removed or feature-flagged off in Phase 3. They still serve iOS users.
+- iOS Info.plist field `OrchetVoiceBase` is intentionally absent in this phase — adding it triggers Phase 6 work (Daily iOS SDK + native confirmation modal).
+- Document this iOS-batch-still-supported invariant in PR 1's audit-log + tool-policy code: orchestrator must accept tool calls from both channels (`channel: "voice"` from new path, `channel: "voice_legacy"` from gateway proxy of iOS batch — name to be confirmed in PR 1).
+
+### Cosmetic: rename `/debug/echo` → `/debug/voice-session` (deferred to a cleanup PR)
+
+Phase 2 left the session-create endpoint named `/debug/echo` (a Phase 1 holdover). The smoke client and PR 3 will both call it; if you rename it during Phase 3 you must update both call sites in the same PR set. Recommended: leave the name as-is for Phase 3 and rename in a separate "Phase 2 cleanup" PR before Phase 4 dispatches.
+
+### Updated "what done looks like"
+
+In addition to the original criteria, Phase 3 is complete when:
+
+7. `NEXT_PUBLIC_VOICE_MODE_BACKEND=streaming` is a flag-flip away from default-on (no further code changes needed to roll out).
+8. A real web user (not the smoke client) can open www.orchet.ai with the flag flipped to `streaming`, hit voice mode, and have the call routed via Daily WebRTC to `orchet-voice.fly.dev` — and Honeycomb shows the full streaming span chain (`voice.stt.stream` → `voice.llm.stream` → `voice.tts.stream` → `voice.total.mouth_to_ear` with `voice.tts.barge_in_ms` recorded when the user interrupts).
+9. iOS users on the same build continue working through the batch path unchanged.
+10. Conversation history at `GET /history/sessions/:id/messages` shows voice turns alongside text turns, with `voice.session_id` + `voice.turn_id` on the rows.
+
+### What this amendment does NOT change
+
+- The three-PR structure and merge order (orchet-backend → orchet-voice → orchet-web).
+- The three outcomes (executed / requires_visual_confirmation / denied) and the risk policy.
+- The high-risk action policy (critical always denied; high always confirmed; low/medium executed).
+- The Pipecat 0.0.61 function-call frame interception pattern.
+- The contract proposal at [voice-turn-contract-proposal.md](../voice-turn-contract-proposal.md).
+
