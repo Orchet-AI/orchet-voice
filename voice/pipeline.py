@@ -31,9 +31,12 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from voice.obs.tracing import get_tracer
 
 STT_STREAM_SPAN_NAME = "voice.stt.stream"
+SARVAM_STT_SPAN_NAME = "voice.stt.sarvam"
 LLM_STREAM_SPAN_NAME = "voice.llm.stream"
 TTS_STREAM_SPAN_NAME = "voice.tts.stream"
+SARVAM_TTS_SPAN_NAME = "voice.tts.sarvam"
 TOTAL_MOUTH_TO_EAR_SPAN_NAME = "voice.total.mouth_to_ear"
+LANG_DETECT_SPAN_NAME = "voice.lang.detect"
 
 CLIENT_KIND_IOS = "ios"
 CLIENT_KIND_WEB = "web"
@@ -45,7 +48,7 @@ class VoiceMetadata:
     user_id: str
     client_kind: str = CLIENT_KIND_WEB
     region: str = "iad"
-    locale: str = "en-US"
+    locale: str = "unknown"
     agent_id: str = "orchet-super-agent"
     llm_model: str = "llama-3.3-70b-versatile"
     tts_voice_id: str = "aura-2-andromeda-en"
@@ -97,15 +100,86 @@ class VoiceTurnTracker:
         self._turn: VoiceTurn | None = None
         self._turn_index = 0
         self._snapshot_dispatcher = snapshot_dispatcher
+        self._locale = metadata.locale or "unknown"
+        self._stt_provider = "deepgram"
+        self._tts_provider = "deepgram"
+        self._tts_voice_id = metadata.tts_voice_id
 
     @property
     def current(self) -> VoiceTurn | None:
         return self._turn
 
+    @property
+    def locale(self) -> str:
+        return self._locale
+
+    @property
+    def stt_provider(self) -> str:
+        return self._stt_provider
+
+    @property
+    def tts_provider(self) -> str:
+        return self._tts_provider
+
+    @property
+    def tts_voice_id(self) -> str:
+        return self._tts_voice_id
+
+    @property
+    def stt_span_name(self) -> str:
+        return SARVAM_STT_SPAN_NAME if self._stt_provider == "sarvam" else STT_STREAM_SPAN_NAME
+
+    @property
+    def tts_span_name(self) -> str:
+        return SARVAM_TTS_SPAN_NAME if self._tts_provider == "sarvam" else TTS_STREAM_SPAN_NAME
+
     def set_snapshot_dispatcher(
         self, snapshot_dispatcher: InterruptedTurnSnapshotter | None
     ) -> None:
         self._snapshot_dispatcher = snapshot_dispatcher
+
+    def set_locale(
+        self,
+        locale: str,
+        *,
+        stt_provider: str | None = None,
+        tts_provider: str | None = None,
+        tts_voice_id: str | None = None,
+    ) -> None:
+        self._locale = locale or "unknown"
+        if stt_provider:
+            self._stt_provider = stt_provider
+        if tts_provider:
+            self._tts_provider = tts_provider
+        if tts_voice_id:
+            self._tts_voice_id = tts_voice_id
+        self._apply_locale_to_active_spans()
+
+    def record_language_detection(
+        self,
+        *,
+        locale: str,
+        confidence: float,
+        elapsed_ms: int,
+        provider: str,
+        stt_provider: str,
+        tts_provider: str,
+        tts_voice_id: str | None = None,
+    ) -> None:
+        self.set_locale(
+            locale,
+            stt_provider=stt_provider,
+            tts_provider=tts_provider,
+            tts_voice_id=tts_voice_id,
+        )
+        turn = self.ensure_turn()
+        parent = trace.set_span_in_context(turn.total_span) if turn.total_span else None
+        span = self._tracer.start_span(LANG_DETECT_SPAN_NAME, context=parent)
+        self._set_common_attributes(span, turn)
+        span.set_attribute("voice.detect.confidence", confidence)
+        span.set_attribute("voice.detect.elapsed_ms", elapsed_ms)
+        span.set_attribute("voice.detect.provider", provider)
+        span.end()
 
     def start_turn(
         self, turn_id: str | None = None, *, started_at: float | None = None
@@ -202,6 +276,15 @@ class VoiceTurnTracker:
         span.set_attribute("voice.session_id", self._metadata.voice_session_id)
         span.set_attribute("voice.turn_id", turn.turn_id)
         span.set_attribute("client.kind", self._metadata.client_kind)
+        span.set_attribute("voice.locale", self._locale)
+
+    def _apply_locale_to_active_spans(self) -> None:
+        turn = self._turn
+        if not turn:
+            return
+        for span in (turn.total_span, turn.stt_span, turn.llm_span, turn.tts_span):
+            if span and span.is_recording():
+                span.set_attribute("voice.locale", self._locale)
 
 
 class ClientVADInterruptionProcessor(FrameProcessor):
@@ -258,7 +341,8 @@ class STTSpanProcessor(FrameProcessor):
             turn = self._tracker.ensure_turn()
             if not turn.stt_span or not turn.stt_span.is_recording():
                 turn.stt_started_at = _now()
-                turn.stt_span = self._tracker.start_stage_span(STT_STREAM_SPAN_NAME)
+                turn.stt_span = self._tracker.start_stage_span(self._tracker.stt_span_name)
+                turn.stt_span.set_attribute("voice.stt.provider", self._tracker.stt_provider)
         elif isinstance(frame, InterimTranscriptionFrame):
             self._handle_interim(frame)
         elif isinstance(frame, TranscriptionFrame):
@@ -271,7 +355,8 @@ class STTSpanProcessor(FrameProcessor):
             return
         turn = self._tracker.ensure_turn()
         if not turn.stt_span or not turn.stt_span.is_recording():
-            turn.stt_span = self._tracker.start_stage_span(STT_STREAM_SPAN_NAME)
+            turn.stt_span = self._tracker.start_stage_span(self._tracker.stt_span_name)
+            turn.stt_span.set_attribute("voice.stt.provider", self._tracker.stt_provider)
         turn.partial_count += 1
         if turn.timing.stt_first_partial_ms is None:
             turn.timing.stt_first_partial_ms = _elapsed_ms(turn.stt_started_at)
@@ -282,7 +367,8 @@ class STTSpanProcessor(FrameProcessor):
             return
         turn = self._tracker.ensure_turn()
         if not turn.stt_span or not turn.stt_span.is_recording():
-            turn.stt_span = self._tracker.start_stage_span(STT_STREAM_SPAN_NAME)
+            turn.stt_span = self._tracker.start_stage_span(self._tracker.stt_span_name)
+            turn.stt_span.set_attribute("voice.stt.provider", self._tracker.stt_provider)
 
         turn.user_transcript = f"{turn.user_transcript} {text}".strip()
         turn.timing.stt_final_ms = _elapsed_ms(turn.stt_started_at)
@@ -291,6 +377,7 @@ class STTSpanProcessor(FrameProcessor):
         )
         turn.stt_span.set_attribute("voice.stt.final_ms", turn.timing.stt_final_ms)
         turn.stt_span.set_attribute("voice.stt.partial_count", turn.partial_count)
+        turn.stt_span.set_attribute("voice.stt.provider", self._tracker.stt_provider)
         turn.stt_span.end()
 
 
@@ -389,9 +476,9 @@ class TTSSpanProcessor(FrameProcessor):
         turn = self._tracker.ensure_turn()
         if not turn.tts_span or not turn.tts_span.is_recording():
             turn.tts_started_at = _now()
-            turn.tts_span = self._tracker.start_stage_span(TTS_STREAM_SPAN_NAME)
-            turn.tts_span.set_attribute("voice.tts.provider", "deepgram")
-            turn.tts_span.set_attribute("voice.tts.voice_id", self._metadata.tts_voice_id)
+            turn.tts_span = self._tracker.start_stage_span(self._tracker.tts_span_name)
+            turn.tts_span.set_attribute("voice.tts.provider", self._tracker.tts_provider)
+            turn.tts_span.set_attribute("voice.tts.voice_id", self._tracker.tts_voice_id)
 
     def _handle_tts_audio(self) -> None:
         turn = self._tracker.ensure_turn()
@@ -412,8 +499,8 @@ class TTSSpanProcessor(FrameProcessor):
 
         turn.tts_span.set_attribute("voice.tts.first_chunk_ms", turn.timing.tts_first_chunk_ms or 0)
         turn.tts_span.set_attribute("voice.tts.total_chars", turn.tts_total_chars)
-        turn.tts_span.set_attribute("voice.tts.provider", "deepgram")
-        turn.tts_span.set_attribute("voice.tts.voice_id", self._metadata.tts_voice_id)
+        turn.tts_span.set_attribute("voice.tts.provider", self._tracker.tts_provider)
+        turn.tts_span.set_attribute("voice.tts.voice_id", self._tracker.tts_voice_id)
         turn.tts_span.end()
 
 

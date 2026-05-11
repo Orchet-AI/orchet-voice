@@ -21,6 +21,7 @@ def test_health_shape(settings: Settings) -> None:
     assert isinstance(payload["uptime_seconds"], int)
     assert payload["checks"] == {
         "deepgram_reachable": "ok",
+        "sarvam_reachable": "ok",
         "daily_reachable": "ok",
         "supabase_jwt_validator": "ok",
         "honeycomb_exporter": "missing",

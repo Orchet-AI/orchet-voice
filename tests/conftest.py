@@ -20,6 +20,7 @@ def settings() -> Settings:
         daily_api_key="test-daily",
         daily_room_domain="orchet.daily.co",
         lumo_deepgram_api_key="test-deepgram",
+        sarvam_api_key="test-sarvam",
         groq_api_key="test-groq",
         anthropic_api_key="test-anthropic",
         otel_endpoint="",
@@ -28,12 +29,16 @@ def settings() -> Settings:
         default_llm="groq",
         voice_stt_model="nova-3",
         voice_stt_endpointing_ms=300,
+        voice_sarvam_stt_model="saarika:v2.5",
+        voice_language_detection_seconds=2.0,
         voice_llm_model="llama-3.3-70b-versatile",
         voice_llm_max_tokens=250,
         voice_llm_temperature=0.7,
         voice_tts_voice="aura-2-andromeda-en",
         voice_tts_sample_rate=24000,
         voice_tts_encoding="linear16",
+        voice_sarvam_tts_model="bulbul:v3-beta",
+        voice_sarvam_tts_speaker="aditya",
     )
 
 
