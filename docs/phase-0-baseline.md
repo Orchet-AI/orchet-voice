@@ -1,7 +1,7 @@
 # Phase 0 — Voice baseline
 
 **Measured:** 2026-05-11
-**Dashboard:** TODO — create dashboard from [phase-0-honeycomb-dashboard-spec.yaml](./phase-0-honeycomb-dashboard-spec.yaml)
+**Dashboard:** [VOICE-PHASE-0 — REST Voice Baseline](https://ui.honeycomb.io/lumo/environments/test/board/kvRUiNXYcvk) (Honeycomb board `kvRUiNXYcvk` in `lumo/test` environment, dataset `lumo-ml-service`)
 **Traffic window:** TODO — last 24h after backend, web, and iOS instrumentation are deployed together
 **Sample count:** 0 verified web + 0 verified ios turns in this Codex run; needs 50 web + 50 ios measured turns to fill
 
@@ -40,7 +40,8 @@
 
 ## Caveats
 
-- Dashboard creation is blocked on Honeycomb web UI access. Build it from [phase-0-honeycomb-dashboard-spec.yaml](./phase-0-honeycomb-dashboard-spec.yaml), then replace the dashboard TODO above with the real URL.
+- Dashboard created via Honeycomb Configuration API (board `kvRUiNXYcvk`). Five panels attached, each backed by a saved query and query annotation.
+- **Some panels are placeholders until columns exist:** the geography panel (panel 4) breaks down by `client.ip.region` per the spec, but that column doesn't exist in `lumo-ml-service` until voice spans with regional context flow. The panel currently shows aggregate-only data; edit it in the Honeycomb UI to add the breakdown once `client.ip.region` appears in the column list. Same applies to `client.kind` for the per-client-type breakdown on the end-to-end panel — placeholder query is column-safe and aggregates across all clients.
 - No Honeycomb data was queried from this Codex run because no Honeycomb UI or API credential was available in the environment.
 - Do not interpret placeholder rows as latency results. Re-run the runbook after deployed traffic or synthetic turns accumulate.
 - Client-to-backend distributed trace nesting is pragmatic, not perfect. Phase 0 correlation relies on `voice.session_id`, `voice.turn_id`, and `client.kind` wherever traceparent propagation was not already present.
