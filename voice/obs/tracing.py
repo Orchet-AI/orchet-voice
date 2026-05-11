@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from fastapi import FastAPI
 from opentelemetry import trace
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -36,7 +38,7 @@ def configure_tracing(app: FastAPI, settings: Settings) -> None:
     provider.add_span_processor(
         BatchSpanProcessor(
             OTLPSpanExporter(
-                endpoint=settings.otel_endpoint,
+                endpoint=normalize_otlp_endpoint(settings.otel_endpoint),
                 headers=parse_otlp_headers(settings.otel_headers),
             )
         )
@@ -53,3 +55,10 @@ def parse_otlp_headers(raw_headers: str) -> dict[str, str]:
         if separator and key and value:
             headers[key] = value
     return headers
+
+
+def normalize_otlp_endpoint(endpoint: str) -> str:
+    parsed = urlparse(endpoint)
+    if parsed.netloc == "api.honeycomb.io" and parsed.path in {"", "/"}:
+        return "https://api.honeycomb.io/v1/traces"
+    return endpoint

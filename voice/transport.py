@@ -3,20 +3,36 @@ from __future__ import annotations
 import asyncio
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
 import structlog
+from deepgram import LiveOptions
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
+from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
+from pipecat.services.groq import GroqLLMService
+from pipecat.services.openai import BaseOpenAILLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
 from voice.auth import AuthenticatedUser
-from voice.pipeline import EchoAudioProcessor, EchoMetadata
+from voice.persistence import DeferredTranscriptPersistence
+from voice.pipeline import (
+    ClientVADInterruptionProcessor,
+    LLMSpanProcessor,
+    STTSpanProcessor,
+    TTSSpanProcessor,
+    VoiceMetadata,
+    VoiceTurnTracker,
+)
 from voice.settings import Settings
 
 logger = structlog.get_logger()
+
+PROMPT_PATH = Path(__file__).parent / "prompts" / "default_voice.txt"
 
 
 @dataclass(frozen=True)
@@ -26,7 +42,7 @@ class DailyRoom:
 
 
 @dataclass(frozen=True)
-class EchoSession:
+class VoiceSession:
     session_id: str
     room_name: str
     room_url: str
@@ -38,7 +54,7 @@ class EchoSession:
 class DailyApiClient:
     def __init__(self, settings: Settings, http_client: httpx.AsyncClient | None = None):
         if not settings.daily_api_key:
-            raise ValueError("DAILY_API_KEY is required to create echo sessions")
+            raise ValueError("DAILY_API_KEY is required to create voice sessions")
 
         self._settings = settings
         self._http_client = http_client or httpx.AsyncClient(
@@ -99,7 +115,7 @@ class DailyApiClient:
             await self._http_client.aclose()
 
 
-class EchoSessionManager:
+class VoiceSessionManager:
     def __init__(self, settings: Settings):
         self._settings = settings
         self._daily: DailyApiClient | None = None
@@ -112,9 +128,11 @@ class EchoSessionManager:
         requested_session_id: str | None,
         client_kind: str,
         ttl_seconds: int,
-    ) -> EchoSession:
+    ) -> VoiceSession:
+        self._validate_provider_settings()
+
         session_id = requested_session_id or f"voice_{uuid4().hex}"
-        room_name = f"orchet-phase1-{uuid4().hex[:16]}"
+        room_name = f"orchet-phase2-{uuid4().hex[:16]}"
         expires_at = int(time.time()) + ttl_seconds
 
         daily = self._daily_client()
@@ -123,7 +141,7 @@ class EchoSessionManager:
             room.name,
             expires_at,
             is_owner=True,
-            user_name="Orchet Echo Bot",
+            user_name="Orchet Voice Bot",
         )
         client_token = await daily.create_meeting_token(
             room.name,
@@ -132,26 +150,33 @@ class EchoSessionManager:
             user_name=user.email or user.user_id,
         )
 
+        metadata = VoiceMetadata(
+            voice_session_id=session_id,
+            user_id=user.user_id,
+            client_kind=client_kind,
+            llm_model=self._settings.voice_llm_model,
+            tts_voice_id=self._settings.voice_tts_voice,
+        )
         task = asyncio.create_task(
-            run_daily_echo_pipeline(
+            run_daily_voice_pipeline(
                 room_url=room.url,
                 bot_token=bot_token,
-                daily_api_key=self._settings.daily_api_key,
-                metadata=EchoMetadata(voice_session_id=session_id, client_kind=client_kind),
+                settings=self._settings,
+                metadata=metadata,
             ),
-            name=f"daily-echo-{session_id}",
+            name=f"daily-voice-{session_id}",
         )
         self._tasks[session_id] = task
         task.add_done_callback(lambda done: self._handle_done(session_id, done))
 
         logger.info(
-            "voice.echo.session_started",
+            "voice.session_started",
             voice_session_id=session_id,
             user_id=user.user_id,
             room_name=room.name,
             region=self._settings.region,
         )
-        return EchoSession(
+        return VoiceSession(
             session_id=session_id,
             room_name=room.name,
             room_url=room.url,
@@ -175,49 +200,120 @@ class EchoSessionManager:
     def _handle_done(self, session_id: str, task: asyncio.Task[None]) -> None:
         self._tasks.pop(session_id, None)
         if task.cancelled():
-            logger.info("voice.echo.session_cancelled", voice_session_id=session_id)
+            logger.info("voice.session_cancelled", voice_session_id=session_id)
             return
         error = task.exception()
         if error:
             logger.error(
-                "voice.echo.session_failed",
+                "voice.session_failed",
                 voice_session_id=session_id,
                 error=str(error),
             )
 
+    def _validate_provider_settings(self) -> None:
+        missing = []
+        if not self._settings.lumo_deepgram_api_key:
+            missing.append("LUMO_DEEPGRAM_API_KEY")
+        if not self._settings.groq_api_key:
+            missing.append("GROQ_API_KEY")
+        if missing:
+            raise ValueError(f"missing required provider secrets: {', '.join(missing)}")
 
-async def run_daily_echo_pipeline(
+
+async def run_daily_voice_pipeline(
     *,
     room_url: str,
     bot_token: str,
-    daily_api_key: str,
-    metadata: EchoMetadata,
+    settings: Settings,
+    metadata: VoiceMetadata,
 ) -> None:
+    tracker = VoiceTurnTracker(metadata)
+    persistence = DeferredTranscriptPersistence(
+        gateway_url=settings.gateway_url,
+        internal_token=settings.internal_token,
+        enabled=settings.voice_persistence_enabled,
+    )
     transport = DailyTransport(
         room_url,
         bot_token,
-        "Orchet Echo Bot",
+        "Orchet Voice Bot",
         DailyParams(
-            api_key=daily_api_key,
+            api_key=settings.daily_api_key,
             audio_in_enabled=True,
             audio_in_sample_rate=16000,
             audio_out_enabled=True,
-            audio_out_sample_rate=16000,
+            audio_out_sample_rate=settings.voice_tts_sample_rate,
             audio_out_channels=1,
             transcription_enabled=False,
         ),
     )
-    pipeline = Pipeline([transport.input(), EchoAudioProcessor(metadata), transport.output()])
+
+    stt = DeepgramSTTService(
+        api_key=settings.lumo_deepgram_api_key,
+        sample_rate=16000,
+        live_options=LiveOptions(
+            encoding="linear16",
+            language="en-US",
+            model=settings.voice_stt_model,
+            channels=1,
+            interim_results=True,
+            smart_format=True,
+            punctuate=True,
+            endpointing=settings.voice_stt_endpointing_ms,
+        ),
+    )
+    llm = GroqLLMService(
+        api_key=settings.groq_api_key,
+        model=settings.voice_llm_model,
+        params=BaseOpenAILLMService.InputParams(
+            max_tokens=settings.voice_llm_max_tokens,
+            temperature=settings.voice_llm_temperature,
+        ),
+    )
+    tts = DeepgramTTSService(
+        api_key=settings.lumo_deepgram_api_key,
+        voice=settings.voice_tts_voice,
+        sample_rate=settings.voice_tts_sample_rate,
+        encoding=settings.voice_tts_encoding,
+        aggregate_sentences=True,
+    )
+
+    context = OpenAILLMContext.from_messages(
+        [{"role": "system", "content": PROMPT_PATH.read_text(encoding="utf-8").strip()}]
+    )
+    context_aggregator = llm.create_context_aggregator(
+        context,
+        user_kwargs={"aggregation_timeout": 0.05},
+    )
+
+    pipeline = Pipeline(
+        [
+            transport.input(),
+            ClientVADInterruptionProcessor(tracker),
+            stt,
+            STTSpanProcessor(tracker),
+            context_aggregator.user(),
+            llm,
+            LLMSpanProcessor(tracker, metadata),
+            tts,
+            TTSSpanProcessor(tracker, metadata, persistence),
+            transport.output(),
+            context_aggregator.assistant(),
+        ]
+    )
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
             allow_interruptions=True,
             audio_in_sample_rate=16000,
-            audio_out_sample_rate=16000,
+            audio_out_sample_rate=settings.voice_tts_sample_rate,
             enable_metrics=False,
-            enable_usage_metrics=False,
+            enable_usage_metrics=True,
         ),
         idle_timeout_secs=300,
     )
     runner = PipelineRunner(handle_sigint=False)
-    await runner.run(task)
+    try:
+        await runner.run(task)
+    finally:
+        await persistence.aclose()

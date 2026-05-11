@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+import voice.pipeline as pipeline
+from tests.test_pipeline_helpers import FakeTracer
 from voice.settings import Settings
 
 
@@ -24,4 +26,20 @@ def settings() -> Settings:
         otel_headers="",
         honeycomb_api_key="test-honeycomb",
         default_llm="groq",
+        voice_stt_model="nova-3",
+        voice_stt_endpointing_ms=300,
+        voice_llm_model="llama-3.3-70b-versatile",
+        voice_llm_max_tokens=250,
+        voice_llm_temperature=0.7,
+        voice_tts_voice="aura-2-andromeda-en",
+        voice_tts_sample_rate=24000,
+        voice_tts_encoding="linear16",
+        voice_persistence_enabled=False,
     )
+
+
+@pytest.fixture
+def fake_tracer(monkeypatch: pytest.MonkeyPatch) -> FakeTracer:
+    tracer = FakeTracer()
+    monkeypatch.setattr(pipeline, "get_tracer", lambda: tracer)
+    return tracer
