@@ -26,7 +26,7 @@ You are NOT building the new voice service. You are NOT touching the voice produ
 - Change tool execution policy or wiring
 - Change payment, booking, or any irreversible-action flow
 - Add telephony / PSTN / Exotel / μ-law audio handling
-- Change the existing STT route, TTS route, or `/orchestrator/turn` request/response shapes (canonical: `/integrations/stt` / `/integrations/tts` via gateway; web/iOS callers may call a thin wrapper — do not invent `/api/*` paths)
+- Change the existing STT route, TTS route, or `/orchestrator/turn` request/response shapes. **Canonical client-facing paths (verified in `orchet-backend/services/gateway/src/route-table.ts`):** `/stt`, `/tts`, `/chat` (which maps internally to `/turn` on orchestrator). Do not invent `/api/*` or `/integrations/*` paths.
 - Introduce new STT, TTS, or LLM providers (Sarvam goes in Phase 3 — Phase 0 smoke harness only)
 - Modify production user voice flows beyond adding spans (no UI changes, no latency optimizations, no refactors)
 - Commit secrets, real user audio samples, or provider API keys
@@ -48,7 +48,7 @@ You are NOT building the new voice service. You are NOT touching the voice produ
 | Span | Where it lives | Start trigger | End trigger |
 |---|---|---|---|
 | `voice.client.capture` | orchet-web + orchet-ios (client) | User taps mic | First audio chunk encoded + ready to upload |
-| `voice.upload` | orchet-web + orchet-ios (client) | First chunk sent | Upload complete (HTTP 200 from the existing STT route) |
+| `voice.upload` | orchet-web + orchet-ios (client) | First chunk sent | Upload complete (HTTP 200 from `/stt`) |
 | `voice.stt.batch` | orchet-backend (`services/integrations/src/routes/stt.ts`) | Route enters | Deepgram REST returns transcript |
 | `voice.orchestrator.turn` | orchet-backend (`services/orchestrator/src/routes/turn.ts`) | Route enters | Final SSE frame `{type:"done"}` emitted |
 | `voice.tts.batch` | orchet-backend (`services/integrations/src/routes/tts.ts`) | Route enters | Deepgram REST returns audio + 200 |
@@ -223,7 +223,12 @@ After the PRs land but before reporting completion:
 
 - **Out-of-scope discoveries.** If during instrumentation you find an obvious bug or perf win in the current voice path, DO NOT fix it in this PR. Open a separate issue/task in the relevant repo and link from your final report. We want Phase 0 to be a clean measurement increment; mixing in perf fixes pollutes the baseline.
 
-- **Stop condition — route paths.** If the current voice flow in `orchet-web` or `orchet-ios` calls routes that materially differ from what this brief assumes (e.g., the brief mentions `/integrations/stt` but reality is `/voice/upload-audio`), **stop and report**. Use the actual route that exists in the code. **Do not invent or rename `/api/*` paths.** The goal is to measure reality, not to reshape it.
+- **Stop condition — route paths.** If the current voice flow in `orchet-web` or `orchet-ios` calls routes that materially differ from what this brief assumes, **stop and report**. Use the actual route that exists in the code. **Real route table (verified against `orchet-backend/services/gateway/src/route-table.ts`):**
+  - `/stt` → integrations service (top-level public path)
+  - `/tts` → integrations service (top-level public path)
+  - `/chat` → orchestrator service `/turn` (top-level public path; web uses `gatewayFetch("/chat")`)
+  
+  **Do not invent or rename `/api/*` or `/integrations/*` paths.** The goal is to measure reality, not to reshape it.
 
 ---
 
