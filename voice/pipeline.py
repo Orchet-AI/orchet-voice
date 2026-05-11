@@ -125,10 +125,16 @@ class VoiceTurnTracker:
         turn = self._turn
         if not turn:
             return
+        barge_in_ms: int | None = None
+        if turn.tts_span and turn.tts_span.is_recording() and turn.tts_started_at:
+            barge_in_ms = _elapsed_ms(turn.tts_started_at)
+            turn.tts_span.set_attribute("voice.tts.barge_in_ms", barge_in_ms)
         for span in (turn.stt_span, turn.llm_span, turn.tts_span):
             if span and span.is_recording():
                 span.set_attribute("voice.interrupted", True)
                 span.end()
+        if turn.total_span and not turn.total_span_ended and barge_in_ms is not None:
+            turn.total_span.set_attribute("voice.tts.barge_in_ms", barge_in_ms)
         self.finish_total_span(interrupted=True)
 
     def _start_span(self, span_name: str, turn: VoiceTurn) -> Span:
@@ -153,6 +159,7 @@ class ClientVADInterruptionProcessor(FrameProcessor):
         if isinstance(frame, TransportMessageUrgentFrame):
             event = parse_client_vad_event(frame.message)
             if event and event["state"] == "speech_started":
+                self._tracker.interrupt_active_spans()
                 await self.push_frame(StartInterruptionFrame(), FrameDirection.DOWNSTREAM)
                 self._tracker.start_turn(str(event.get("turn_id") or _new_turn_id()))
                 await self.push_frame(UserStartedSpeakingFrame(), FrameDirection.DOWNSTREAM)
