@@ -1,0 +1,152 @@
+title: "VOICE-PHASE-0 REST Voice Baseline"
+description: >
+  Five-panel Honeycomb dashboard spec for the existing REST voice path.
+  Create this manually if Honeycomb web UI access is unavailable to Codex.
+time_window: "last 24 hours"
+dataset: "TODO: Orchet backend/client telemetry dataset"
+field_notes:
+  duration: "Use duration_ms. If the dataset stores duration under a different Honeycomb OTel field, substitute that field consistently."
+  span_name: "Use span.name. If Honeycomb displays the span name as name, substitute name consistently."
+  turn_correlation: "Use voice.turn_id to join client and backend spans when trace nesting is unavailable."
+
+panels:
+  - id: end_to_end
+    title: "End-to-end mouth-to-ear"
+    visualization: "line or table"
+    query:
+      filters:
+        - field: "span.name"
+          op: "="
+          value: "voice.total.mouth_to_ear"
+      calculations:
+        - op: "P50"
+          field: "duration_ms"
+        - op: "P95"
+          field: "duration_ms"
+        - op: "P99"
+          field: "duration_ms"
+        - op: "COUNT"
+      group_by:
+        - "client.kind"
+      order_by: "P95(duration_ms) desc"
+    baseline_report_fields:
+      - "Headline numbers: voice.total.mouth_to_ear"
+      - "Sample count: web + ios"
+
+  - id: per_stage
+    title: "Per-stage p50"
+    visualization: "bar"
+    query:
+      filters:
+        - field: "span.name"
+          op: "in"
+          value:
+            - "voice.client.capture"
+            - "voice.upload"
+            - "voice.stt.batch"
+            - "voice.orchestrator.turn"
+            - "voice.tts.batch"
+            - "voice.client.play"
+      calculations:
+        - op: "P50"
+          field: "duration_ms"
+        - op: "COUNT"
+      group_by:
+        - "span.name"
+        - "client.kind"
+      order_by: "P50(duration_ms) desc"
+    baseline_report_fields:
+      - "Headline numbers: child-stage p50"
+      - "Three observations: dominant stage by p50 latency"
+
+  - id: tail_latency
+    title: "Tail latency ratio by stage"
+    visualization: "table"
+    query:
+      filters:
+        - field: "span.name"
+          op: "in"
+          value:
+            - "voice.total.mouth_to_ear"
+            - "voice.client.capture"
+            - "voice.upload"
+            - "voice.stt.batch"
+            - "voice.orchestrator.turn"
+            - "voice.tts.batch"
+            - "voice.client.play"
+      calculations:
+        - op: "P50"
+          field: "duration_ms"
+          alias: "p50"
+        - op: "P99"
+          field: "duration_ms"
+          alias: "p99"
+        - op: "FORMULA"
+          expression: "p99 / p50"
+          alias: "p99_p50_ratio"
+      group_by:
+        - "span.name"
+        - "client.kind"
+      order_by: "p99_p50_ratio desc"
+    baseline_report_fields:
+      - "Headline numbers: p99"
+      - "Three observations: worst stage by p99 / p50 ratio"
+
+  - id: geography
+    title: "Geography"
+    visualization: "table or heatmap"
+    query:
+      filters:
+        - field: "span.name"
+          op: "="
+          value: "voice.total.mouth_to_ear"
+      calculations:
+        - op: "P50"
+          field: "duration_ms"
+        - op: "P95"
+          field: "duration_ms"
+        - op: "COUNT"
+      group_by:
+        - "client.ip.region"
+        - "client.kind"
+      derived_regions:
+        US: "client.ip.region in [US, NA-US]"
+        EU: "client.ip.region in [EU, Western Europe, Central Europe]"
+        "India / SEA": "client.ip.region in [India, IN, Southeast Asia, SEA]"
+        other: "all other non-empty regions"
+      order_by: "P95(duration_ms) desc"
+    baseline_report_fields:
+      - "By geography"
+      - "Three observations: worst region"
+
+  - id: provider
+    title: "Provider STT/TTS latency"
+    visualization: "line"
+    query:
+      filters:
+        - field: "span.name"
+          op: "in"
+          value:
+            - "voice.stt.batch"
+            - "voice.tts.batch"
+      calculations:
+        - op: "P50"
+          field: "duration_ms"
+        - op: "P95"
+          field: "duration_ms"
+        - op: "COUNT"
+      group_by:
+        - "span.name"
+        - "voice.provider"
+      time_granularity: "10 minutes"
+      order_by: "time asc"
+    baseline_report_fields:
+      - "Provider regression watch"
+      - "Caveats if provider field is absent"
+
+dashboard_materialization_steps:
+  - "Create a new Honeycomb board named VOICE-PHASE-0 REST Voice Baseline."
+  - "Add the five panels above with the global time window set to last 24h."
+  - "If the dataset uses name instead of span.name, substitute the span-name field in every panel."
+  - "If client spans live in a separate client telemetry dataset, duplicate panels 1-4 there or use Honeycomb cross-dataset tooling if available."
+  - "Copy the resulting dashboard URL into docs/phase-0-baseline.md."
