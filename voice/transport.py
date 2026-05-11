@@ -4,7 +4,6 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -12,6 +11,7 @@ import httpx
 import structlog
 from deepgram import LiveOptions
 from pipecat.frames.frames import FunctionCallResultProperties, TTSTextFrame
+from pipecat.pipeline.parallel_pipeline import ParallelPipeline
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -31,13 +31,23 @@ from voice.pipeline import (
     VoiceMetadata,
     VoiceTurnTracker,
 )
+from voice.providers.stt_sarvam import SarvamSTTService
+from voice.providers.tts_sarvam import SarvamTTSService
+from voice.routing.language_router import (
+    LanguageDetectionProcessor,
+    LanguagePromptProcessor,
+    ProviderGateProcessor,
+    SarvamStreamingLanguageDetector,
+    load_voice_prompt,
+    sarvam_locale_for,
+    stt_gate_types,
+    tts_gate_types,
+)
 from voice.settings import Settings
 from voice.tool_catalog import VOICE_FUNCTION_SCHEMAS, VOICE_TOOLS_SCHEMA
 from voice.voice_turn_dispatcher import VoiceTurnDispatcher
 
 logger = structlog.get_logger()
-
-PROMPT_PATH = Path(__file__).parent / "prompts" / "default_voice.txt"
 
 
 @dataclass(frozen=True)
@@ -220,6 +230,8 @@ class VoiceSessionManager:
         missing = []
         if not self._settings.lumo_deepgram_api_key:
             missing.append("LUMO_DEEPGRAM_API_KEY")
+        if not self._settings.sarvam_api_key:
+            missing.append("SARVAM_API_KEY")
         if not self._settings.groq_api_key:
             missing.append("GROQ_API_KEY")
         if missing:
@@ -256,7 +268,18 @@ async def run_daily_voice_pipeline(
         ),
     )
 
-    stt = DeepgramSTTService(
+    language_detector = SarvamStreamingLanguageDetector(
+        api_key=settings.sarvam_api_key,
+        model=settings.voice_sarvam_stt_model,
+    )
+    language_router = LanguageDetectionProcessor(
+        tracker=tracker,
+        detector=language_detector,
+        sarvam_tts_speaker=settings.voice_sarvam_tts_speaker,
+        deepgram_tts_voice=settings.voice_tts_voice,
+        detection_seconds=settings.voice_language_detection_seconds,
+    )
+    deepgram_stt = DeepgramSTTService(
         api_key=settings.lumo_deepgram_api_key,
         sample_rate=16000,
         live_options=LiveOptions(
@@ -270,6 +293,34 @@ async def run_daily_voice_pipeline(
             endpointing=settings.voice_stt_endpointing_ms,
         ),
     )
+    sarvam_stt = SarvamSTTService(
+        api_key=settings.sarvam_api_key,
+        target_language_code="unknown",
+        model=settings.voice_sarvam_stt_model,
+        sample_rate=16000,
+    )
+    stt = ParallelPipeline(
+        [
+            ProviderGateProcessor(
+                tracker=tracker,
+                provider="deepgram",
+                selected_provider=lambda: tracker.stt_provider,
+                gated_types=stt_gate_types(),
+                name="orchet-deepgram-stt-gate",
+            ),
+            deepgram_stt,
+        ],
+        [
+            ProviderGateProcessor(
+                tracker=tracker,
+                provider="sarvam",
+                selected_provider=lambda: tracker.stt_provider,
+                gated_types=stt_gate_types(),
+                name="orchet-sarvam-stt-gate",
+            ),
+            sarvam_stt,
+        ],
+    )
     llm = GroqLLMService(
         api_key=settings.groq_api_key,
         model=settings.voice_llm_model,
@@ -278,18 +329,49 @@ async def run_daily_voice_pipeline(
             temperature=settings.voice_llm_temperature,
         ),
     )
-    tts = DeepgramTTSService(
+    deepgram_tts = DeepgramTTSService(
         api_key=settings.lumo_deepgram_api_key,
         voice=settings.voice_tts_voice,
         sample_rate=settings.voice_tts_sample_rate,
         encoding=settings.voice_tts_encoding,
         aggregate_sentences=True,
     )
+    sarvam_tts = SarvamTTSService(
+        api_key=settings.sarvam_api_key,
+        target_language_code=lambda: sarvam_locale_for(tracker.locale),
+        model=settings.voice_sarvam_tts_model,
+        speaker=settings.voice_sarvam_tts_speaker,
+        sample_rate=settings.voice_tts_sample_rate,
+        output_audio_codec=settings.voice_tts_encoding,
+        aggregate_sentences=True,
+    )
+    tts = ParallelPipeline(
+        [
+            ProviderGateProcessor(
+                tracker=tracker,
+                provider="deepgram",
+                selected_provider=lambda: tracker.tts_provider,
+                gated_types=tts_gate_types(),
+                name="orchet-deepgram-tts-gate",
+            ),
+            deepgram_tts,
+        ],
+        [
+            ProviderGateProcessor(
+                tracker=tracker,
+                provider="sarvam",
+                selected_provider=lambda: tracker.tts_provider,
+                gated_types=tts_gate_types(),
+                name="orchet-sarvam-tts-gate",
+            ),
+            sarvam_tts,
+        ],
+    )
     transport_output = transport.output()
     _register_voice_tools(llm, dispatcher, transport_output)
 
     context = OpenAILLMContext.from_messages(
-        [{"role": "system", "content": PROMPT_PATH.read_text(encoding="utf-8").strip()}]
+        [{"role": "system", "content": load_voice_prompt(metadata.locale)}]
     )
     context.set_tools(VOICE_TOOLS_SCHEMA)
     context.set_tool_choice("auto")
@@ -302,8 +384,10 @@ async def run_daily_voice_pipeline(
         [
             transport.input(),
             ClientVADInterruptionProcessor(tracker, dispatcher),
+            language_router,
             stt,
             STTSpanProcessor(tracker),
+            LanguagePromptProcessor(tracker=tracker, context=context),
             context_aggregator.user(),
             llm,
             LLMSpanProcessor(tracker, metadata),

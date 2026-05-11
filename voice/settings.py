@@ -18,6 +18,7 @@ class Settings:
     daily_api_key: str
     daily_room_domain: str
     lumo_deepgram_api_key: str
+    sarvam_api_key: str
     groq_api_key: str
     anthropic_api_key: str
     otel_endpoint: str
@@ -26,12 +27,16 @@ class Settings:
     default_llm: str
     voice_stt_model: str
     voice_stt_endpointing_ms: int
+    voice_sarvam_stt_model: str
+    voice_language_detection_seconds: float
     voice_llm_model: str
     voice_llm_max_tokens: int
     voice_llm_temperature: float
     voice_tts_voice: str
     voice_tts_sample_rate: int
     voice_tts_encoding: str
+    voice_sarvam_tts_model: str
+    voice_sarvam_tts_speaker: str
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -46,6 +51,7 @@ class Settings:
             daily_api_key=os.getenv("DAILY_API_KEY", ""),
             daily_room_domain=os.getenv("DAILY_ROOM_DOMAIN", "orchet.daily.co"),
             lumo_deepgram_api_key=os.getenv("LUMO_DEEPGRAM_API_KEY", ""),
+            sarvam_api_key=os.getenv("SARVAM_API_KEY", ""),
             groq_api_key=os.getenv("GROQ_API_KEY", ""),
             anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
             otel_endpoint=os.getenv("LUMO_OTEL_ENDPOINT", ""),
@@ -54,12 +60,18 @@ class Settings:
             default_llm=os.getenv("ORCHET_VOICE_LLM_DEFAULT", "groq"),
             voice_stt_model=os.getenv("ORCHET_VOICE_STT_MODEL", "nova-3"),
             voice_stt_endpointing_ms=_int_env("ORCHET_VOICE_STT_ENDPOINTING_MS", 300),
+            voice_sarvam_stt_model=os.getenv("ORCHET_VOICE_SARVAM_STT_MODEL", "saarika:v2.5"),
+            voice_language_detection_seconds=_float_env(
+                "ORCHET_VOICE_LANGUAGE_DETECTION_SECONDS", 2.0
+            ),
             voice_llm_model=os.getenv("ORCHET_VOICE_LLM_MODEL", "llama-3.3-70b-versatile"),
             voice_llm_max_tokens=_int_env("ORCHET_VOICE_LLM_MAX_TOKENS", 250),
             voice_llm_temperature=_float_env("ORCHET_VOICE_LLM_TEMPERATURE", 0.7),
             voice_tts_voice=os.getenv("ORCHET_VOICE_TTS_VOICE", "aura-2-andromeda-en"),
             voice_tts_sample_rate=_int_env("ORCHET_VOICE_TTS_SAMPLE_RATE", 24000),
             voice_tts_encoding=os.getenv("ORCHET_VOICE_TTS_ENCODING", "linear16"),
+            voice_sarvam_tts_model=os.getenv("ORCHET_VOICE_SARVAM_TTS_MODEL", "bulbul:v3-beta"),
+            voice_sarvam_tts_speaker=os.getenv("ORCHET_VOICE_SARVAM_TTS_SPEAKER", "aditya"),
         )
 
     @property
@@ -79,11 +91,13 @@ class Settings:
             "ORCHET_INTERNAL_TOKEN",
             "ORCHET_VOICE_ENV",
             "ORCHET_VOICE_LLM_DEFAULT",
+            "SARVAM_API_KEY",
         )
 
     def health_checks(self) -> dict[str, str]:
         return {
             "deepgram_reachable": _configured(self.lumo_deepgram_api_key),
+            "sarvam_reachable": _configured(self.sarvam_api_key),
             "daily_reachable": _configured(self.daily_api_key and self.daily_room_domain),
             "supabase_jwt_validator": _configured(self.supabase_url and self.supabase_anon_key),
             "honeycomb_exporter": _configured(self.otel_endpoint and self.otel_headers),
