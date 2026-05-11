@@ -34,7 +34,6 @@ def settings() -> Settings:
         voice_tts_voice="aura-2-andromeda-en",
         voice_tts_sample_rate=24000,
         voice_tts_encoding="linear16",
-        voice_persistence_enabled=False,
     )
 
 

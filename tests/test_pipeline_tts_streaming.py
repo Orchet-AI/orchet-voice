@@ -8,7 +8,6 @@ from pipecat.frames.frames import (
 )
 
 from tests.test_pipeline_helpers import FakeTracer, collect_frames
-from voice.persistence import DeferredTranscriptPersistence
 from voice.pipeline import (
     TOTAL_MOUTH_TO_EAR_SPAN_NAME,
     TTS_STREAM_SPAN_NAME,
@@ -28,12 +27,7 @@ async def test_tts_stream_span_records_first_chunk_and_total_chars(
     )
     tracker = VoiceTurnTracker(metadata)
     tracker.start_turn("turn_test")
-    persistence = DeferredTranscriptPersistence(
-        gateway_url="https://api.orchet.ai",
-        internal_token="",
-        enabled=False,
-    )
-    processor = TTSSpanProcessor(tracker, metadata, persistence)
+    processor = TTSSpanProcessor(tracker, metadata)
 
     await collect_frames(processor, TTSStartedFrame())
     await collect_frames(
@@ -52,4 +46,3 @@ async def test_tts_stream_span_records_first_chunk_and_total_chars(
     assert tts_span.attributes["voice.tts.voice_id"] == "aura-2-andromeda-en"
     assert isinstance(tts_span.attributes["voice.tts.first_chunk_ms"], int)
     assert tts_span.attributes["voice.tts.total_chars"] == len("Tokyo is currently ahead of UTC.")
-    await persistence.aclose()

@@ -2,24 +2,27 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import httpx
 import structlog
 from deepgram import LiveOptions
+from pipecat.frames.frames import FunctionCallResultProperties, TTSTextFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
+from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
 from pipecat.services.groq import GroqLLMService
 from pipecat.services.openai import BaseOpenAILLMService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
 from voice.auth import AuthenticatedUser
-from voice.persistence import DeferredTranscriptPersistence
 from voice.pipeline import (
     ClientVADInterruptionProcessor,
     LLMSpanProcessor,
@@ -29,6 +32,8 @@ from voice.pipeline import (
     VoiceTurnTracker,
 )
 from voice.settings import Settings
+from voice.tool_catalog import VOICE_FUNCTION_SCHEMAS, VOICE_TOOLS_SCHEMA
+from voice.voice_turn_dispatcher import VoiceTurnDispatcher
 
 logger = structlog.get_logger()
 
@@ -154,6 +159,7 @@ class VoiceSessionManager:
             voice_session_id=session_id,
             user_id=user.user_id,
             client_kind=client_kind,
+            region=self._settings.region,
             llm_model=self._settings.voice_llm_model,
             tts_voice_id=self._settings.voice_tts_voice,
         )
@@ -228,11 +234,13 @@ async def run_daily_voice_pipeline(
     metadata: VoiceMetadata,
 ) -> None:
     tracker = VoiceTurnTracker(metadata)
-    persistence = DeferredTranscriptPersistence(
+    dispatcher = VoiceTurnDispatcher(
         gateway_url=settings.gateway_url,
         internal_token=settings.internal_token,
-        enabled=settings.voice_persistence_enabled,
+        metadata=metadata,
+        tracker=tracker,
     )
+    tracker.set_snapshot_dispatcher(dispatcher)
     transport = DailyTransport(
         room_url,
         bot_token,
@@ -277,10 +285,14 @@ async def run_daily_voice_pipeline(
         encoding=settings.voice_tts_encoding,
         aggregate_sentences=True,
     )
+    transport_output = transport.output()
+    _register_voice_tools(llm, dispatcher, transport_output)
 
     context = OpenAILLMContext.from_messages(
         [{"role": "system", "content": PROMPT_PATH.read_text(encoding="utf-8").strip()}]
     )
+    context.set_tools(VOICE_TOOLS_SCHEMA)
+    context.set_tool_choice("auto")
     context_aggregator = llm.create_context_aggregator(
         context,
         user_kwargs={"aggregation_timeout": 0.05},
@@ -289,15 +301,15 @@ async def run_daily_voice_pipeline(
     pipeline = Pipeline(
         [
             transport.input(),
-            ClientVADInterruptionProcessor(tracker),
+            ClientVADInterruptionProcessor(tracker, dispatcher),
             stt,
             STTSpanProcessor(tracker),
             context_aggregator.user(),
             llm,
             LLMSpanProcessor(tracker, metadata),
             tts,
-            TTSSpanProcessor(tracker, metadata, persistence),
-            transport.output(),
+            TTSSpanProcessor(tracker, metadata),
+            transport_output,
             context_aggregator.assistant(),
         ]
     )
@@ -316,4 +328,34 @@ async def run_daily_voice_pipeline(
     try:
         await runner.run(task)
     finally:
-        await persistence.aclose()
+        await dispatcher.aclose()
+
+
+def _register_voice_tools(
+    llm: GroqLLMService,
+    dispatcher: VoiceTurnDispatcher,
+    transport_output: object,
+) -> None:
+    async def handler(
+        function_name: str,
+        tool_call_id: str,
+        arguments: object,
+        service: Any,
+        context: object,
+        result_callback: Callable[..., Awaitable[None]],
+    ) -> None:
+        del tool_call_id, context
+        outcome = await dispatcher.dispatch(
+            function_name,
+            arguments if isinstance(arguments, dict) else {},
+            transport=transport_output,
+        )
+        if outcome.spoken_text:
+            await service.push_frame(TTSTextFrame(outcome.spoken_text), FrameDirection.DOWNSTREAM)
+        await result_callback(
+            outcome.function_result,
+            properties=FunctionCallResultProperties(run_llm=outcome.run_llm),
+        )
+
+    for schema in VOICE_FUNCTION_SCHEMAS:
+        llm.register_function(schema.name, handler, cancel_on_interruption=True)
