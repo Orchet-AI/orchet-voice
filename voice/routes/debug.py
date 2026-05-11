@@ -7,18 +7,18 @@ from pydantic import BaseModel, Field
 
 from voice.auth import AuthConfigurationError, AuthError, validate_authorization_header
 from voice.settings import Settings
-from voice.transport import EchoSession, EchoSessionManager
+from voice.transport import VoiceSession, VoiceSessionManager
 
 router = APIRouter()
 
 
-class EchoConnectRequest(BaseModel):
+class VoiceConnectRequest(BaseModel):
     voice_session_id: str | None = Field(default=None, min_length=1, max_length=128)
     client_kind: Literal["web", "ios"] = "web"
     ttl_seconds: int = Field(default=600, ge=60, le=1800)
 
 
-class EchoConnectResponse(BaseModel):
+class VoiceConnectResponse(BaseModel):
     voice_session_id: str
     room_name: str
     room_url: str
@@ -27,14 +27,14 @@ class EchoConnectResponse(BaseModel):
     region: str
 
 
-@router.post("/debug/echo", response_model=EchoConnectResponse)
-async def create_debug_echo_session(
-    payload: EchoConnectRequest,
+@router.post("/debug/echo", response_model=VoiceConnectResponse)
+async def create_debug_voice_session(
+    payload: VoiceConnectRequest,
     request: Request,
     authorization: str | None = Header(default=None),
-) -> EchoConnectResponse:
+) -> VoiceConnectResponse:
     settings: Settings = request.app.state.settings
-    sessions: EchoSessionManager = request.app.state.echo_sessions
+    sessions: VoiceSessionManager = request.app.state.voice_sessions
 
     try:
         user = await validate_authorization_header(authorization, settings)
@@ -56,14 +56,14 @@ async def create_debug_echo_session(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"failed to create Daily echo session: {exc}",
+            detail=f"failed to create Daily voice session: {exc}",
         ) from exc
 
     return _to_response(session)
 
 
-def _to_response(session: EchoSession) -> EchoConnectResponse:
-    return EchoConnectResponse(
+def _to_response(session: VoiceSession) -> VoiceConnectResponse:
+    return VoiceConnectResponse(
         voice_session_id=session.session_id,
         room_name=session.room_name,
         room_url=session.room_url,

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Orchet Phase 1 Echo Smoke</title>
+    <title>Orchet Phase 2 Voice Smoke</title>
     <style>
       body {
         font-family: system-ui, sans-serif;
@@ -29,6 +29,9 @@
         margin-top: 1rem;
         padding: 0.7rem 1rem;
       }
+      button:disabled {
+        opacity: 0.5;
+      }
       pre {
         background: #111;
         color: #f5f5f5;
@@ -40,7 +43,7 @@
     </style>
   </head>
   <body>
-    <h1>Phase 1 Echo Smoke</h1>
+    <h1>Phase 2 Voice Smoke</h1>
 
     <label for="serviceUrl">Voice service URL</label>
     <input id="serviceUrl" value="https://orchet-voice.fly.dev" />
@@ -48,18 +51,71 @@
     <label for="jwt">Supabase access token</label>
     <textarea id="jwt" spellcheck="false"></textarea>
 
-    <button id="start">Connect and capture 5 seconds</button>
+    <button id="start">Connect</button>
+    <button id="stop" disabled>Stop</button>
     <pre id="log"></pre>
 
     <script src="https://unpkg.com/@daily-co/daily-js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.22/dist/bundle.min.js"></script>
     <script>
       const logEl = document.querySelector("#log");
+      const startButton = document.querySelector("#start");
+      const stopButton = document.querySelector("#stop");
+      let call = null;
+      let micVad = null;
+      let currentTurnId = null;
+      let voiceSessionId = null;
+
       const log = (line) => {
         const stamp = new Date().toISOString();
         logEl.textContent += `[${stamp}] ${line}\n`;
       };
 
-      document.querySelector("#start").addEventListener("click", async () => {
+      const newTurnId = () => {
+        if (crypto.randomUUID) {
+          return `turn_${crypto.randomUUID()}`;
+        }
+        return `turn_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      };
+
+      const sendVadEvent = (state) => {
+        if (!call || !voiceSessionId) {
+          return;
+        }
+        if (state === "speech_started") {
+          currentTurnId = newTurnId();
+        }
+        call.sendAppMessage(
+          {
+            type: "barge_in",
+            state,
+            voice_session_id: voiceSessionId,
+            turn_id: currentTurnId,
+            client_kind: "web",
+            client_sent_at: Date.now(),
+          },
+          "*",
+        );
+        log(`VAD ${state} turn_id=${currentTurnId}`);
+      };
+
+      const teardown = async () => {
+        if (micVad) {
+          micVad.pause();
+          micVad = null;
+        }
+        if (call) {
+          await call.leave();
+          await call.destroy();
+          call = null;
+        }
+        startButton.disabled = false;
+        stopButton.disabled = true;
+        log("Smoke stopped.");
+      };
+
+      startButton.addEventListener("click", async () => {
         const serviceUrl = document.querySelector("#serviceUrl").value.replace(/\/$/, "");
         const jwt = document.querySelector("#jwt").value.trim();
         if (!jwt) {
@@ -67,6 +123,7 @@
           return;
         }
 
+        startButton.disabled = true;
         const handshakeStart = performance.now();
         const response = await fetch(`${serviceUrl}/debug/echo`, {
           method: "POST",
@@ -80,15 +137,17 @@
           }),
         });
         if (!response.ok) {
+          startButton.disabled = false;
           log(`signaling failed: ${response.status} ${await response.text()}`);
           return;
         }
 
         const session = await response.json();
-        log(`voice_session_id=${session.voice_session_id}`);
+        voiceSessionId = session.voice_session_id;
+        log(`voice_session_id=${voiceSessionId}`);
         log(`room=${session.room_url}`);
 
-        const call = DailyIframe.createCallObject({
+        call = DailyIframe.createCallObject({
           audioSource: true,
           videoSource: false,
           subscribeToTracksAutomatically: true,
@@ -100,23 +159,32 @@
         call.on("participant-joined", (event) => {
           log(`participant joined: ${event.participant.user_name || event.participant.session_id}`);
         });
+        call.on("app-message", (event) => {
+          log(`app message: ${JSON.stringify(event.data)}`);
+        });
 
         await call.join({ url: session.room_url, token: session.client_token });
-        log("Mic capture active. Speak for 5 seconds; echoed audio should play back.");
 
-        window.setTimeout(async () => {
-          try {
-            if (typeof call.getNetworkStats === "function") {
-              const stats = await call.getNetworkStats();
-              log(`Daily network stats: ${JSON.stringify(stats)}`);
-            }
-          } catch (error) {
-            log(`network stats unavailable: ${error}`);
-          }
-          await call.leave();
-          await call.destroy();
-          log("Smoke complete.");
-        }, 5000);
+        micVad = await vad.MicVAD.new({
+          onSpeechStart: () => sendVadEvent("speech_started"),
+          onSpeechEnd: () => sendVadEvent("speech_ended"),
+        });
+        micVad.start();
+        stopButton.disabled = false;
+        log('Ask: "What time is it in Tokyo?" then interrupt with "what about London?"');
+      });
+
+      stopButton.addEventListener("click", () => {
+        teardown().catch((error) => log(`teardown failed: ${error}`));
+      });
+
+      window.addEventListener("beforeunload", () => {
+        if (micVad) {
+          micVad.pause();
+        }
+        if (call) {
+          call.leave();
+        }
       });
     </script>
   </body>

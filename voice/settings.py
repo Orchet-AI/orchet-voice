@@ -24,6 +24,15 @@ class Settings:
     otel_headers: str
     honeycomb_api_key: str
     default_llm: str
+    voice_stt_model: str
+    voice_stt_endpointing_ms: int
+    voice_llm_model: str
+    voice_llm_max_tokens: int
+    voice_llm_temperature: float
+    voice_tts_voice: str
+    voice_tts_sample_rate: int
+    voice_tts_encoding: str
+    voice_persistence_enabled: bool
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -44,6 +53,15 @@ class Settings:
             otel_headers=os.getenv("LUMO_OTEL_HEADERS", ""),
             honeycomb_api_key=os.getenv("ORCHET_HONEYCOMB_API_KEY", ""),
             default_llm=os.getenv("ORCHET_VOICE_LLM_DEFAULT", "groq"),
+            voice_stt_model=os.getenv("ORCHET_VOICE_STT_MODEL", "nova-3"),
+            voice_stt_endpointing_ms=_int_env("ORCHET_VOICE_STT_ENDPOINTING_MS", 300),
+            voice_llm_model=os.getenv("ORCHET_VOICE_LLM_MODEL", "llama-3.3-70b-versatile"),
+            voice_llm_max_tokens=_int_env("ORCHET_VOICE_LLM_MAX_TOKENS", 250),
+            voice_llm_temperature=_float_env("ORCHET_VOICE_LLM_TEMPERATURE", 0.7),
+            voice_tts_voice=os.getenv("ORCHET_VOICE_TTS_VOICE", "aura-2-andromeda-en"),
+            voice_tts_sample_rate=_int_env("ORCHET_VOICE_TTS_SAMPLE_RATE", 24000),
+            voice_tts_encoding=os.getenv("ORCHET_VOICE_TTS_ENCODING", "linear16"),
+            voice_persistence_enabled=_bool_env("ORCHET_VOICE_PERSISTENCE_ENABLED", False),
         )
 
     @property
@@ -76,3 +94,24 @@ class Settings:
 
 def _configured(value: object) -> str:
     return "ok" if bool(value) else "missing"
+
+
+def _int_env(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if not value:
+        return default
+    return int(value)
+
+
+def _float_env(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if not value:
+        return default
+    return float(value)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}

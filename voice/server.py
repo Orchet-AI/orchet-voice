@@ -9,14 +9,14 @@ from voice.obs.logging import configure_logging
 from voice.obs.tracing import configure_tracing
 from voice.routes import debug, health
 from voice.settings import Settings
-from voice.transport import EchoSessionManager
+from voice.transport import VoiceSessionManager
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    app.state.echo_sessions = EchoSessionManager(app.state.settings)
+    app.state.voice_sessions = VoiceSessionManager(app.state.settings)
     yield
-    await app.state.echo_sessions.shutdown()
+    await app.state.voice_sessions.shutdown()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
