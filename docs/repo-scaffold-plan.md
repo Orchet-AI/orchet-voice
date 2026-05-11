@@ -22,7 +22,7 @@ This document is the implementation blueprint for the orchet-voice repo's Phase 
 | LLM quality | **Anthropic Claude Sonnet** | Per-agent override; ~500 ms TTFT |
 | TTS default | **Deepgram Aura-2** (streaming) | Already integrated; ~100 ms first chunk |
 | TTS Indian | **Sarvam Bulbul** (Phase 4) | Day 1 is Aura-2 only |
-| Host | **Fly.io Machines** | Long-lived persistent service; multi-region |
+| Host (Phase 1 pilot) | **Fly.io Machines** | Long-lived persistent service; multi-region; **validated by Phase 1b India RTT probe** — fallback options documented in ADR Decision comparison |
 | Observability | **OpenTelemetry → Honeycomb** | Matches existing backend pattern |
 | Container | **Docker + uv** | Reproducible deps via uv; fast cold builds on Fly |
 | CI | **GitHub Actions** | Same pattern as other Orchet-AI repos |

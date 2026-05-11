@@ -1,7 +1,7 @@
-# ADR — Low-latency voice agent architecture (v5)
+# ADR — Low-latency voice agent architecture (v6)
 
 **ID:** VOICE-ARCHITECTURE-1
-**Status:** Approved (v5, 2026-05-10) — ready for execution
+**Status:** Approved (v6, 2026-05-10) — ready for execution
 **Author:** Kalas (CEO/CTO) + Claude (drafting) + ChatGPT (review)
 **Reviewers:** Engineering, Product
 **Supersedes:** the current turn-based voice path (gateway → integrations `/stt`/`/tts` + orchestrator `/turn`)
@@ -11,7 +11,8 @@
 - **v2** — Moved orchestrator to Fly.io; added Sarvam and Exotel telephony. Superseded: (a) voice cannot own tool execution policy, (b) irreversible actions need visual confirmation, (c) APAC latency measurement must happen earlier, (d) new repo should be split from Day 1.
 - **v3** — Locked in safety boundaries, split voice to its own repo, pulled APAC + Sarvam evaluation earlier. Superseded by scope correction: Exotel telephony was scope creep.
 - **v4** — Removed Exotel telephony entirely; core voice = browser + iOS WebRTC only. Superseded by phase-decomposition improvement.
-- **v5 (this)** — Split the original Phase 2 (streaming pipeline + interruption + orchestrator integration + visual confirmation, all in one) into Phase 2 (pipeline + interruption, no tools) and Phase 3 (orchestrator integration + visual confirmation). Smaller blast radius per phase, faster Phase 2 demo, no intermediate insecure state. Both Claude and ChatGPT reviews converged on this architecture — execution begins.
+- **v5** — Split the original Phase 2 into Phase 2 (pipeline + interruption, no tools) and Phase 3 (orchestrator integration + visual confirmation). Superseded by host-commitment relaxation after third review.
+- **v6 (this)** — Softened Fly.io commitment from "approved Phase 1–5" to "Phase 1 pilot, validated at Phase 1b India RTT probe, fallback hosts documented". Added explicit decision-comparison section showing why Pipecat + Daily + Fly.io were chosen over alternatives and what triggers a pivot. Pipecat commitment stays locked (replaceable later at defined cost). Phase 0 scope unchanged — measure existing path, no 3-way pilot bake-off.
 
 ---
 
@@ -27,7 +28,7 @@ We build a dedicated **voice service** (new repo: `Orchet-AI/orchet-voice`) on *
 
 **Where Modal fits:** ML brain only (`lumo-ml-service` — embeddings, classification, BGE, CLIP, Whisper batch). Modal is NOT in the audio hot path.
 
-**Hosting commitment:** Fly.io approved for Phase 1–5 build. Hosting decision revisited at Phase 6 production-hardening review based on real latency / cost / reliability data from launch traffic.
+**Hosting commitment:** Fly.io is the **Phase 1 pilot** host. Validated by the Phase 1b India RTT probe (target p50 < 200 ms from a Mumbai-region client). If the probe fails the gate, we pivot to a fallback host per the [Decision comparison](#decision-comparison) section. Re-validated at Phase 6 production-hardening review under launch traffic.
 
 **Repo:** New `Orchet-AI/orchet-voice` repo (matches established split pattern with mcp / web / ios / android / brand / backend).
 
@@ -458,6 +459,54 @@ Approve the v5 architecture. Start Phase 0 (measurement + Sarvam evaluation) thi
 - Added Sarvam (Indian-language coverage for browser/mobile voice)
 - Moved interruption from Phase 3 → Phase 2 (Day-1 must-have)
 - Cost dropped from ~$1,170/mo → ~$120/mo baseline by changing host
+
+---
+
+## Decision comparison
+
+This section documents *why* the locked choices won and *what would trigger a pivot*. It is the audit trail behind v6 — a third reviewer asked for this explicitly.
+
+### Pipeline framework — locked: Pipecat
+
+| Option | Considered | Why not chosen | Trigger to revisit |
+|---|---|---|---|
+| **Pipecat OSS** | ✓ Chosen | Pipeline-first; fits single-user agent voice; mature; creators support Daily transport | — |
+| LiveKit Agents | ✓ Evaluated | Infra-first; shines for multi-party rooms (5 humans + AI); our use case is one user + one agent — Pipecat's pipeline composability wins | We add multi-party features (voice agent joins a Zoom-style call) |
+| Custom minimal WebRTC bridge | ✓ Evaluated | Reinvents pipeline, VAD, barge-in, frame handling — we'd burn weeks rebuilding what Pipecat provides | We hit a Pipecat-specific blocker that can't be patched upstream |
+| Daily Bots / Pipecat Cloud (managed) | ✓ Evaluated | Less control, vendor lock-in, scales with pricing markup; for a critical-path product service we prefer self-host | If team velocity is the constraint and infra burn is unaffordable at <$5k/mo voice spend |
+
+**Pivot cost if Pipecat ever becomes wrong:** ~1 week to swap framework. Pipeline shape (transport → STT → LLM → TTS + VAD + interruption) is framework-agnostic. Provider clients (Deepgram, Groq, Aura-2) carry over as-is.
+
+### Host — Phase 1 pilot: Fly.io
+
+| Option | Considered | Decision | Trigger to pivot |
+|---|---|---|---|
+| **Fly.io Machines** | ✓ Pilot | Best fit for long-lived stateful WebRTC sessions; 30+ regions including bom (Mumbai), sin (Singapore); $30/mo/region; mature WebSocket support | Phase 1b India RTT probe shows p50 > 400 ms → pivot to fallback A; OR ops complexity proves untenable → pivot to fallback B |
+| Render Pro | Considered | US/EU only — no India region; misses our largest growth market | (used as **fallback A** for US/EU-only fallback if Fly fails India) |
+| LiveKit Cloud (managed) | Considered | Managed media + agent infra; pricing scales worse at high voice-hour volumes; vendor lock-in | (used as **fallback B** for managed-everything if ops bandwidth is the constraint) |
+| Railway | Considered | Less mature than Fly for WebSocket-heavy workloads; smaller region coverage | — |
+| AWS ECS/Fargate | Considered | Full control but high ops overhead; only sensible at $5k+/mo voice spend | (used as **fallback C** for max control if we hit $10k+/mo voice scale and migrate off PaaS) |
+| Modal | Considered | Serverless model fights long-lived sessions; cold-start tax; cost higher than Fly at warm capacity | Reserved for ML brain (`lumo-ml-service`), not for voice |
+
+**Fallback decision tree (executed at end of Phase 1b):**
+
+| Phase 1b probe result | Action |
+|---|---|
+| India p50 < 200 ms, no ops blockers | Continue with Fly for Phases 2–5 |
+| India p50 200–400 ms | Continue with Fly; prioritize multi-region deploy earlier (move from Phase 5 to Phase 3) |
+| India p50 > 400 ms | **Pivot** — evaluate LiveKit Cloud (fallback B) for managed multi-region, or Render Pro (fallback A) for US/EU launch with India deferred |
+| Ops complexity > 2 days/week | **Pivot** — LiveKit Cloud (fallback B) |
+| Voice cost > $5k/mo with growth ahead | **Phase 5 review** — AWS ECS (fallback C) for sustained scale |
+
+**Pivot cost if Fly ever becomes wrong:** ~3 days to migrate (Docker portable; Pipecat portable; env vars portable). Daily transport, providers, and `/voice/turn` contract all carry over unchanged.
+
+### WebRTC transport — locked: Daily Cloud
+
+| Option | Considered | Why not chosen | Trigger to revisit |
+|---|---|---|---|
+| **Daily Cloud** | ✓ Chosen | By Pipecat creators; best-supported transport adapter; $0.01/min; global SFU built-in; handles NAT/region routing | — |
+| Self-hosted SFU (mediasoup, LiveKit, Janus) | ✓ Evaluated | Multi-week project on its own; not justified until 5k+ voice hours/mo | Daily costs scale linearly past $2k/mo voice transport spend |
+| SmallWebRTCTransport (Pipecat built-in) | ✓ Evaluated | v0.0.62+ has known choppy-audio regression; pin to 0.0.61 if used | Used as Phase 6 failover only |
 
 ---
 
