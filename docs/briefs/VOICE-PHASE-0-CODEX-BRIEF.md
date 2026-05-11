@@ -26,7 +26,7 @@ You are NOT building the new voice service. You are NOT touching the voice produ
 - Change tool execution policy or wiring
 - Change payment, booking, or any irreversible-action flow
 - Add telephony / PSTN / Exotel / μ-law audio handling
-- Change the existing `/api/stt`, `/api/tts`, or `/orchestrator/turn` request/response shapes
+- Change the existing STT route, TTS route, or `/orchestrator/turn` request/response shapes (canonical: `/integrations/stt` / `/integrations/tts` via gateway; web/iOS callers may call a thin wrapper — do not invent `/api/*` paths)
 - Introduce new STT, TTS, or LLM providers (Sarvam goes in Phase 3 — Phase 0 smoke harness only)
 - Modify production user voice flows beyond adding spans (no UI changes, no latency optimizations, no refactors)
 - Commit secrets, real user audio samples, or provider API keys
@@ -48,7 +48,7 @@ You are NOT building the new voice service. You are NOT touching the voice produ
 | Span | Where it lives | Start trigger | End trigger |
 |---|---|---|---|
 | `voice.client.capture` | orchet-web + orchet-ios (client) | User taps mic | First audio chunk encoded + ready to upload |
-| `voice.upload` | orchet-web + orchet-ios (client) | First chunk sent | Upload complete (HTTP 200 from /api/stt) |
+| `voice.upload` | orchet-web + orchet-ios (client) | First chunk sent | Upload complete (HTTP 200 from the existing STT route) |
 | `voice.stt.batch` | orchet-backend (`services/integrations/src/routes/stt.ts`) | Route enters | Deepgram REST returns transcript |
 | `voice.orchestrator.turn` | orchet-backend (`services/orchestrator/src/routes/turn.ts`) | Route enters | Final SSE frame `{type:"done"}` emitted |
 | `voice.tts.batch` | orchet-backend (`services/integrations/src/routes/tts.ts`) | Route enters | Deepgram REST returns audio + 200 |
@@ -57,23 +57,29 @@ You are NOT building the new voice service. You are NOT touching the voice produ
 
 **Span names are load-bearing.** Honeycomb dashboards and downstream telemetry queries will reference these exact strings. Do not abbreviate, do not pluralize, do not change case.
 
-**Parent/child relationships:**
-- `voice.total.mouth_to_ear` is the parent of all six others
-- `voice.client.capture` and `voice.upload` are children of `voice.total.mouth_to_ear` on the client side
-- The backend spans (`voice.stt.batch`, `voice.orchestrator.turn`, `voice.tts.batch`) become children via W3C Trace Context propagation — the gateway already forwards `traceparent` headers per the existing `@orchet/observability` setup
+**Parent/child relationships (pragmatic, not perfectionist):**
+- `voice.total.mouth_to_ear` is the **client-side parent span where possible** — covers `voice.client.capture`, `voice.upload`, `voice.client.play` on the client
+- Backend spans (`voice.stt.batch`, `voice.orchestrator.turn`, `voice.tts.batch`) should be **correlated through W3C trace context (`traceparent`) when propagation is already working** — the gateway forwards `traceparent` per the existing `@orchet/observability` setup, so if web/iOS already emit `traceparent` on outbound requests, backend spans nest automatically
+- **If `traceparent` propagation is not already wired on web or iOS, do NOT add it as part of this brief.** Instead, correlate by stamping all spans (client + backend) with attributes:
+  - `voice.session_id` — same per voice turn
+  - `voice.turn_id` — unique per turn
+  - `client.kind` — `web` / `ios`
+- A Honeycomb query joining on `voice.turn_id` is good enough for Phase 0. Perfect distributed tracing is Phase 6 production-hardening work, not Phase 0 measurement work.
 
 ### 2. Repos to touch
 
 | Repo | What | Why |
 |---|---|---|
-| `Orchet-AI/orchet-web` | Add client-side spans in voice mode component(s); search for `MediaRecorder`, `fetch('/api/stt'`, audio playback handlers. Likely under `app/voice-mode/` or wherever the voice UI lives | Web users are the primary measurement target for Phase 0 |
+| `Orchet-AI/orchet-web` | Add client-side spans in voice mode component(s); search for `MediaRecorder`, the existing STT-upload `fetch(...)` call, and audio playback handlers. Likely under `app/voice-mode/` or wherever the voice UI lives. **Do not invent `/api/*` paths — find and use whatever path the existing code calls.** | Web users are the primary measurement target for Phase 0 |
 | `Orchet-AI/orchet-backend` | Wrap the three named routes with spans; reuse existing `@orchet/observability` tracer | Server-side is where the slowest hops live |
-| `Orchet-AI/orchet-ios` | Add same client spans via `OSSignposter` → OTel exporter; iOS voice flow lives in `Lumo/Services/{ChatService.swift, CompoundStreamService.swift}` and related files | iOS users may have materially different latency profile — measure separately |
+| `Orchet-AI/orchet-ios` | Add same client spans via `OSSignposter` (+ structured timing logs stamped with `voice.session_id` / `voice.turn_id`). Only wire a full OTel exporter if one already exists or the integration is < 2 hours. iOS voice flow lives in `Lumo/Services/{ChatService.swift, CompoundStreamService.swift}` and related files. | iOS users may have a materially different latency profile — measure separately, but don't blow up scope adding a new SDK |
 | `Orchet-AI/orchet-voice` | **Docs only** — commit `docs/phase-0-baseline.md` with the baseline numbers + observations | Phase 0 is docs-only on the voice repo |
 
-### 3. Honeycomb dashboard (1 page, 5 panels)
+### 3. Honeycomb dashboard or dashboard spec (1 page, 5 panels)
 
-Set up in the existing Orchet Honeycomb account (API key already exists as `ORCHET_HONEYCOMB_API_KEY` in Render env for orchet-backend).
+**Conditional execution:** If you have access to the Orchet Honeycomb account, create the dashboard. (API key exists as `ORCHET_HONEYCOMB_API_KEY` in Render env for orchet-backend; web UI access is a separate credential.)
+
+**If you do NOT have Honeycomb web UI access:** commit a `docs/phase-0-honeycomb-dashboard-spec.yaml` (or `.md`) describing each panel's query, group-by, percentile, time window, and visualization type. Leave the dashboard URL in `docs/phase-0-baseline.md` as `TODO — create dashboard from spec` and flag in your status report that a human with Honeycomb access needs to materialize it.
 
 Panels:
 
@@ -166,7 +172,11 @@ If any blocker (audio sample sourcing, Sarvam signup, etc.) — skip the harness
 1. **Day 1 morning** — read [`VOICE-ARCHITECTURE-1.md`](../architecture/VOICE-ARCHITECTURE-1.md) + [`phase-0-measurement-plan.md`](../phase-0-measurement-plan.md). Grep the three target repos for `voice.`, `MediaRecorder`, `Deepgram`, `OSSignposter` to map current call sites.
 2. **Day 1 afternoon** — instrument `orchet-backend` (smallest blast radius, easiest to verify). Three spans: `voice.stt.batch`, `voice.orchestrator.turn`, `voice.tts.batch`. PR to orchet-backend.
 3. **Day 2 morning** — instrument `orchet-web` voice mode. Four spans including the parent `voice.total.mouth_to_ear`. PR to orchet-web.
-4. **Day 2 afternoon** — instrument `orchet-ios` voice mode. Same four spans, via swift-otel SDK (audit whether the SDK is already wired; if not, add it). PR to orchet-ios.
+4. **Day 2 afternoon** — instrument `orchet-ios` voice mode. **Pragmatic order:**
+   - First check: does the iOS app already emit OpenTelemetry? If yes, use the existing setup
+   - If no: use `OSSignposter` for the four named spans (signpost intervals named exactly per the table) + structured timing logs stamped with `voice.session_id` and `voice.turn_id`
+   - **Do NOT add a full `swift-otel` SDK dependency as part of this brief** — that's a multi-day dependency-management task on its own and would explode Phase 0 scope. Stop and report if iOS OTel-SDK setup looks like more than 2 hours of work.
+   PR to orchet-ios.
 5. **Day 3 morning** — Honeycomb dashboard setup. Trigger ~50 test turns from web + iOS to verify trace continuity. Capture screenshots of the dashboard.
 6. **Day 3 afternoon** — write the baseline report (real numbers if traffic permits, else placeholder + runbook). Write the runbook. Optionally add Sarvam harness. PR to orchet-voice.
 
@@ -212,6 +222,8 @@ After the PRs land but before reporting completion:
   - Any deviation from the 7 span names (don't deviate; raise the question)
 
 - **Out-of-scope discoveries.** If during instrumentation you find an obvious bug or perf win in the current voice path, DO NOT fix it in this PR. Open a separate issue/task in the relevant repo and link from your final report. We want Phase 0 to be a clean measurement increment; mixing in perf fixes pollutes the baseline.
+
+- **Stop condition — route paths.** If the current voice flow in `orchet-web` or `orchet-ios` calls routes that materially differ from what this brief assumes (e.g., the brief mentions `/integrations/stt` but reality is `/voice/upload-audio`), **stop and report**. Use the actual route that exists in the code. **Do not invent or rename `/api/*` paths.** The goal is to measure reality, not to reshape it.
 
 ---
 
