@@ -32,7 +32,6 @@ class Settings:
     voice_tts_voice: str
     voice_tts_sample_rate: int
     voice_tts_encoding: str
-    voice_persistence_enabled: bool
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -61,7 +60,6 @@ class Settings:
             voice_tts_voice=os.getenv("ORCHET_VOICE_TTS_VOICE", "aura-2-andromeda-en"),
             voice_tts_sample_rate=_int_env("ORCHET_VOICE_TTS_SAMPLE_RATE", 24000),
             voice_tts_encoding=os.getenv("ORCHET_VOICE_TTS_ENCODING", "linear16"),
-            voice_persistence_enabled=_bool_env("ORCHET_VOICE_PERSISTENCE_ENABLED", False),
         )
 
     @property
@@ -108,10 +106,3 @@ def _float_env(name: str, default: float) -> float:
     if not value:
         return default
     return float(value)
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}

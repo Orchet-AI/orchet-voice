@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 from uuid import uuid4
 
 from opentelemetry import trace
@@ -28,7 +29,6 @@ from pipecat.metrics.metrics import LLMUsageMetricsData
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from voice.obs.tracing import get_tracer
-from voice.persistence import DeferredTranscriptPersistence, VoiceTurnTiming, VoiceTurnTranscript
 
 STT_STREAM_SPAN_NAME = "voice.stt.stream"
 LLM_STREAM_SPAN_NAME = "voice.llm.stream"
@@ -44,13 +44,31 @@ class VoiceMetadata:
     voice_session_id: str
     user_id: str
     client_kind: str = CLIENT_KIND_WEB
+    region: str = "iad"
+    locale: str = "en-US"
+    agent_id: str = "orchet-super-agent"
     llm_model: str = "llama-3.3-70b-versatile"
     tts_voice_id: str = "aura-2-andromeda-en"
+
+
+class InterruptedTurnSnapshotter(Protocol):
+    async def snapshot_interrupted(self, snapshot: dict[str, Any]) -> None: ...
+
+    def resolve_confirmation(self, confirmation_id: str, result: str) -> None: ...
+
+
+@dataclass
+class VoiceTurnTiming:
+    stt_first_partial_ms: int | None = None
+    stt_final_ms: int | None = None
+    llm_ttft_ms: int | None = None
+    tts_first_chunk_ms: int | None = None
 
 
 @dataclass
 class VoiceTurn:
     turn_id: str
+    turn_index: int
     started_at: float
     stt_started_at: float
     llm_started_at: float | None = None
@@ -69,14 +87,25 @@ class VoiceTurn:
 
 
 class VoiceTurnTracker:
-    def __init__(self, metadata: VoiceMetadata):
+    def __init__(
+        self,
+        metadata: VoiceMetadata,
+        snapshot_dispatcher: InterruptedTurnSnapshotter | None = None,
+    ):
         self._metadata = metadata
         self._tracer = get_tracer()
         self._turn: VoiceTurn | None = None
+        self._turn_index = 0
+        self._snapshot_dispatcher = snapshot_dispatcher
 
     @property
     def current(self) -> VoiceTurn | None:
         return self._turn
+
+    def set_snapshot_dispatcher(
+        self, snapshot_dispatcher: InterruptedTurnSnapshotter | None
+    ) -> None:
+        self._snapshot_dispatcher = snapshot_dispatcher
 
     def start_turn(
         self, turn_id: str | None = None, *, started_at: float | None = None
@@ -84,8 +113,10 @@ class VoiceTurnTracker:
         now = started_at or _now()
         if self._turn and not self._turn.total_span_ended:
             self.finish_total_span(now, interrupted=True)
+        self._turn_index += 1
         self._turn = VoiceTurn(
             turn_id=turn_id or _new_turn_id(),
+            turn_index=self._turn_index,
             started_at=now,
             stt_started_at=now,
         )
@@ -129,13 +160,38 @@ class VoiceTurnTracker:
         if turn.tts_span and turn.tts_span.is_recording() and turn.tts_started_at:
             barge_in_ms = _elapsed_ms(turn.tts_started_at)
             turn.tts_span.set_attribute("voice.tts.barge_in_ms", barge_in_ms)
+        if turn.total_span and not turn.total_span_ended and barge_in_ms is not None:
+            turn.total_span.set_attribute("voice.tts.barge_in_ms", barge_in_ms)
+        self._snapshot_interrupted_turn(turn, barge_in_ms)
         for span in (turn.stt_span, turn.llm_span, turn.tts_span):
             if span and span.is_recording():
                 span.set_attribute("voice.interrupted", True)
                 span.end()
-        if turn.total_span and not turn.total_span_ended and barge_in_ms is not None:
-            turn.total_span.set_attribute("voice.tts.barge_in_ms", barge_in_ms)
         self.finish_total_span(interrupted=True)
+
+    def _snapshot_interrupted_turn(self, turn: VoiceTurn, barge_in_ms: int | None) -> None:
+        if not self._snapshot_dispatcher:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(
+            self._snapshot_dispatcher.snapshot_interrupted(
+                {
+                    "session_id": self._metadata.voice_session_id,
+                    "turn_id": turn.turn_id,
+                    "turn_index": turn.turn_index,
+                    "user_id": self._metadata.user_id,
+                    "channel": "voice",
+                    "interrupted": True,
+                    "user_text": turn.user_transcript,
+                    "assistant_partial_text": turn.assistant_text,
+                    "cancel_at_ms": barge_in_ms,
+                }
+            ),
+            name=f"voice-interrupted-snapshot-{turn.turn_id}",
+        )
 
     def _start_span(self, span_name: str, turn: VoiceTurn) -> Span:
         span = self._tracer.start_span(span_name)
@@ -149,14 +205,32 @@ class VoiceTurnTracker:
 
 
 class ClientVADInterruptionProcessor(FrameProcessor):
-    def __init__(self, tracker: VoiceTurnTracker):
+    def __init__(
+        self,
+        tracker: VoiceTurnTracker,
+        dispatcher: InterruptedTurnSnapshotter | None = None,
+    ):
         super().__init__(name="orchet-client-vad-interruption")
         self._tracker = tracker
+        self._dispatcher = dispatcher
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
 
         if isinstance(frame, TransportMessageUrgentFrame):
+            confirmation = parse_confirmation_resolved_event(frame.message)
+            if confirmation:
+                if self._dispatcher:
+                    self._dispatcher.resolve_confirmation(
+                        confirmation["confirmation_id"], confirmation["result"]
+                    )
+                text = confirmation.get("voice_continuation_hint")
+                if confirmation["result"] == "cancelled" and not text:
+                    text = "No problem, I've cancelled that."
+                if text:
+                    await self.push_frame(TTSTextFrame(text), FrameDirection.DOWNSTREAM)
+                return
+
             event = parse_client_vad_event(frame.message)
             if event and event["state"] == "speech_started":
                 self._tracker.interrupt_active_spans()
@@ -290,12 +364,10 @@ class TTSSpanProcessor(FrameProcessor):
         self,
         tracker: VoiceTurnTracker,
         metadata: VoiceMetadata,
-        persistence: DeferredTranscriptPersistence,
     ):
         super().__init__(name="orchet-tts-span")
         self._tracker = tracker
         self._metadata = metadata
-        self._persistence = persistence
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
@@ -343,16 +415,6 @@ class TTSSpanProcessor(FrameProcessor):
         turn.tts_span.set_attribute("voice.tts.provider", "deepgram")
         turn.tts_span.set_attribute("voice.tts.voice_id", self._metadata.tts_voice_id)
         turn.tts_span.end()
-        self._persistence.schedule(
-            VoiceTurnTranscript(
-                session_id=self._metadata.voice_session_id,
-                turn_id=turn.turn_id,
-                user_id=self._metadata.user_id,
-                user_text=turn.user_transcript,
-                assistant_text=turn.assistant_text.strip(),
-                timing=turn.timing,
-            )
-        )
 
 
 def parse_client_vad_event(message: Any) -> dict[str, Any] | None:
@@ -375,6 +437,22 @@ def parse_client_vad_event(message: Any) -> dict[str, Any] | None:
         "state": normalized_state,
         "turn_id": message.get("turn_id"),
     }
+
+
+def parse_confirmation_resolved_event(message: Any) -> dict[str, str] | None:
+    if not isinstance(message, dict):
+        return None
+    if message.get("type") != "confirmation_resolved":
+        return None
+    confirmation_id = message.get("confirmation_id")
+    result = message.get("result")
+    if not isinstance(confirmation_id, str) or result not in {"executed", "cancelled"}:
+        return None
+    hint = message.get("voice_continuation_hint")
+    event = {"confirmation_id": confirmation_id, "result": result}
+    if isinstance(hint, str) and hint.strip():
+        event["voice_continuation_hint"] = hint.strip()
+    return event
 
 
 def _now() -> float:
