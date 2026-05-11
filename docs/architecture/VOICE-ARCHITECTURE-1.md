@@ -18,7 +18,9 @@
 
 ## TL;DR
 
-We build a dedicated **voice service** (new repo: `Orchet-AI/orchet-voice`) on **Fly.io** (always-on, multi-region) that terminates WebRTC sessions from the web app and iOS app. The service runs **Pipecat OSS** which streams audio through **Deepgram or Sarvam** (language-aware STT), a **per-agent LLM router** (Groq fast path / Claude quality path), and back through **Deepgram Aura-2 or Sarvam Bulbul** TTS.
+We build a dedicated **voice service** (new repo: `Orchet-AI/orchet-voice`) as a **pilot on Fly.io**, with multi-region rollout planned after Phase 1b India RTT probe validates the host choice. The service terminates WebRTC sessions from the web app and iOS app. It runs **Pipecat OSS** which streams audio through **Deepgram or Sarvam** (language-aware STT), a **per-agent LLM router** (Groq fast path / Claude quality path), and back through **Deepgram Aura-2 or Sarvam Bulbul** TTS.
+
+> **Note on numbers:** All cost and latency estimates in this ADR are planning assumptions. They become facts only when Phase 0 measurement and Phase 1 pilot validate them. Treat tables as targets to verify, not commitments.
 
 **Scope (explicit):** Voice mode is for users talking to the Orchet super-agent through the web app and iOS app. This ADR is NOT about telephony — users calling a phone number is a separate product surface with separate requirements (business phone numbers, compliance, μ-law audio, caller-ID identity). If we ever pursue telephony, it gets its own ADR (VOICE-TELEPHONY-1 or similar).
 
@@ -34,7 +36,7 @@ We build a dedicated **voice service** (new repo: `Orchet-AI/orchet-voice`) on *
 
 **Target latencies (mouth-to-ear response, p50 / p95):**
 
-| User region | Phase 1 (Fly IAD only) | Phase 5 (multi-region) |
+| User region | Phase 1 (Fly IAD = production; BOM = probe only) | Phase 5 (multi-region production) |
 |---|---|---|
 | US East | 700 ms / 1.1 s | 700 ms / 1.1 s |
 | EU | 950 ms / 1.4 s | 750 ms / 1.2 s |
@@ -172,7 +174,10 @@ Anything sensitive or stateful is server-side.
 │            │  Outbound HTTPS to api.orchet.ai (gateway)  │         │
 │            │  POST /voice/turn          (tool decisions) │         │
 │            │  POST /sessions/{id}/messages (transcript)  │         │
-│            │  POST /voice/confirm-action  (visual ack)   │         │
+│            │                                             │         │
+│            │  (/voice/confirm-action is called by the    │         │
+│            │   CLIENT after user taps confirm — never    │         │
+│            │   by the voice service directly)            │         │
 │            └─────────────────────────────────────────────┘         │
 │                                                                    │
 │   JWT validation at WS open. Internal token to call back to        │
@@ -427,7 +432,7 @@ Mix-per-agent at scale saves ~5× vs OpenAI Realtime end-to-end.
 
 ## Decision
 
-Approve the v5 architecture. Start Phase 0 (measurement + Sarvam evaluation) this week. Phase 1 (`Orchet-AI/orchet-voice` repo + skeleton + India latency probe) ships next week.
+Approve the v6 architecture. Start Phase 0 (measurement + Sarvam evaluation) this week. Phase 1 (`Orchet-AI/orchet-voice` repo + skeleton + India latency probe) ships next week.
 
 **Hard requirements locked in:**
 1. New repo `Orchet-AI/orchet-voice` (matches established split pattern)
