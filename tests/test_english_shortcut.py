@@ -12,6 +12,7 @@ from pipecat.transcriptions.language import Language
 from tests.test_pipeline_helpers import collect_frames
 from voice.pipeline import VoiceMetadata, VoiceTurnTracker
 from voice.routing.language_router import (
+    AsyncLanguageDetector,
     LanguageDetectionProcessor,
     LanguageDetectionResult,
 )
@@ -179,7 +180,7 @@ async def test_interim_without_confidence_uses_deepgram_english_fallback() -> No
 
 def _processor(
     tracker: VoiceTurnTracker,
-    detector: FakeDetector,
+    detector: AsyncLanguageDetector,
 ) -> LanguageDetectionProcessor:
     return LanguageDetectionProcessor(
         tracker=tracker,
