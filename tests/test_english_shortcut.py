@@ -12,6 +12,7 @@ from pipecat.transcriptions.language import Language
 from tests.test_pipeline_helpers import collect_frames
 from voice.pipeline import VoiceMetadata, VoiceTurnTracker
 from voice.routing.language_router import (
+    AsyncLanguageDetector,
     LanguageDetectionProcessor,
     LanguageDetectionResult,
 )
@@ -106,6 +107,64 @@ async def test_no_interim_within_500ms_falls_through_to_detector() -> None:
     assert tracker.stt_provider == "sarvam"
 
 
+class RaisingDetector:
+    """Simulates Sarvam streaming detector timing out or erroring mid-call."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+        self.calls = 0
+
+    async def detect(
+        self,
+        audio_first_seconds: bytes,
+        *,
+        sample_rate: int,
+    ) -> LanguageDetectionResult:
+        del audio_first_seconds, sample_rate
+        self.calls += 1
+        raise self._exc
+
+
+async def test_detector_timeout_does_not_crash_pipeline_falls_back_to_english() -> None:
+    """Regression test for the 2026-05-13 bom-Fly production incident:
+    when SarvamStreamingLanguageDetector.detect() raised TimeoutError
+    out of asyncio.wait_for, the exception propagated through
+    LanguageDetectionProcessor._detect_and_release and crashed the
+    entire Pipecat pipeline. The bot would join the Daily room, hit
+    the language-detection step on the first speech turn, raise, and
+    the pipeline would die mid-turn — leaving the room with a zombie
+    bot that couldn't process any further audio. The user saw 'listening'
+    indefinitely with no response."""
+    detector = RaisingDetector(TimeoutError())
+    tracker = VoiceTurnTracker(VoiceMetadata(voice_session_id="voice_test", user_id="user_test"))
+    processor = _processor(tracker, detector)
+
+    await collect_frames(processor, UserStartedSpeakingFrame())
+    # Drive enough audio to trigger _detect_and_release
+    await collect_frames(processor, _audio_frame(seconds=2.1))
+
+    assert detector.calls == 1
+    # Fallback: locale defaults to "en" which normalize_locale lifts to "en-US" → Deepgram path
+    assert tracker.locale == "en-US"
+    assert tracker.stt_provider == "deepgram"
+    assert tracker.tts_provider == "deepgram"
+
+
+async def test_detector_generic_exception_does_not_crash_pipeline() -> None:
+    """Same regression — any unexpected exception from the detector
+    should fall back to English/Deepgram instead of taking the bot down."""
+    detector = RaisingDetector(RuntimeError("sarvam blew up"))
+    tracker = VoiceTurnTracker(VoiceMetadata(voice_session_id="voice_test", user_id="user_test"))
+    processor = _processor(tracker, detector)
+
+    await collect_frames(processor, UserStartedSpeakingFrame())
+    await collect_frames(processor, _audio_frame(seconds=2.1))
+
+    assert detector.calls == 1
+    assert tracker.locale == "en-US"
+    assert tracker.stt_provider == "deepgram"
+
+
 async def test_interim_without_confidence_uses_deepgram_english_fallback() -> None:
     detector = FakeDetector()
     tracker = VoiceTurnTracker(VoiceMetadata(voice_session_id="voice_test", user_id="user_test"))
@@ -121,7 +180,7 @@ async def test_interim_without_confidence_uses_deepgram_english_fallback() -> No
 
 def _processor(
     tracker: VoiceTurnTracker,
-    detector: FakeDetector,
+    detector: AsyncLanguageDetector,
 ) -> LanguageDetectionProcessor:
     return LanguageDetectionProcessor(
         tracker=tracker,
