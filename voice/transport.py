@@ -550,7 +550,7 @@ async def run_daily_voice_pipeline(
         voice=settings.voice_tts_voice,
         sample_rate=settings.voice_tts_sample_rate,
         encoding=settings.voice_tts_encoding,
-        aggregate_sentences=True,
+        aggregate_sentences=False,
     )
     sarvam_tts = SarvamTTSService(
         api_key=settings.sarvam_api_key,
@@ -559,7 +559,7 @@ async def run_daily_voice_pipeline(
         speaker=settings.voice_sarvam_tts_speaker,
         sample_rate=settings.voice_tts_sample_rate,
         output_audio_codec=settings.voice_tts_encoding,
-        aggregate_sentences=True,
+        aggregate_sentences=False,
     )
     tts = ParallelPipeline(
         [
@@ -617,13 +617,7 @@ async def run_daily_voice_pipeline(
     )
     task = PipelineTask(
         pipeline,
-        params=PipelineParams(
-            allow_interruptions=True,
-            audio_in_sample_rate=16000,
-            audio_out_sample_rate=settings.voice_tts_sample_rate,
-            enable_metrics=False,
-            enable_usage_metrics=True,
-        ),
+        params=build_voice_pipeline_params(settings),
         idle_timeout_secs=300,
     )
     runner = PipelineRunner(handle_sigint=False)
@@ -644,6 +638,16 @@ async def run_daily_voice_pipeline(
         )
         session_span.end()
         await dispatcher.aclose()
+
+
+def build_voice_pipeline_params(settings: Settings) -> PipelineParams:
+    return PipelineParams(
+        allow_interruptions=True,
+        audio_in_sample_rate=16000,
+        audio_out_sample_rate=settings.voice_tts_sample_rate,
+        enable_metrics=True,
+        enable_usage_metrics=True,
+    )
 
 
 class SessionMigrationCoordinator:
