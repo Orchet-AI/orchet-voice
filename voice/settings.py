@@ -45,7 +45,7 @@ class Settings:
     def from_env(cls) -> Settings:
         return cls(
             environment=os.getenv("ORCHET_VOICE_ENV", "dev"),
-            region=os.getenv("ORCHET_VOICE_REGION") or os.getenv("FLY_REGION", "iad"),
+            region=os.getenv("ORCHET_VOICE_REGION") or os.getenv("FLY_REGION") or "iad",
             version=__version__,
             gateway_url=os.getenv("ORCHET_GATEWAY_URL", "https://api.orchet.ai"),
             internal_token=os.getenv("ORCHET_INTERNAL_TOKEN", ""),

@@ -186,6 +186,7 @@ class LanguageDetectionProcessor(FrameProcessor):
         sarvam_tts_speaker: str,
         deepgram_tts_voice: str,
         detection_seconds: float = 2.0,
+        on_locale_detected: Callable[[str], None] | None = None,
     ):
         super().__init__(name="orchet-language-detection-router")
         self._tracker = tracker
@@ -193,6 +194,7 @@ class LanguageDetectionProcessor(FrameProcessor):
         self._sarvam_tts_speaker = sarvam_tts_speaker
         self._deepgram_tts_voice = deepgram_tts_voice
         self._detection_seconds = detection_seconds
+        self._on_locale_detected = on_locale_detected
         self._audio_buffer: list[InputAudioRawFrame] = []
         self._pending_start: UserStartedSpeakingFrame | None = None
         self._detected_for_turn: str | None = None
@@ -246,6 +248,8 @@ class LanguageDetectionProcessor(FrameProcessor):
             tts_provider=tts_provider,
             tts_voice_id=voice_id,
         )
+        if self._on_locale_detected:
+            self._on_locale_detected(locale)
         self._detected_for_turn = locale
         self._released = True
 

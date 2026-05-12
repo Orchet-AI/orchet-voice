@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from voice.obs.logging import configure_logging
 from voice.obs.tracing import configure_tracing
-from voice.routes import debug, health
+from voice.routes import debug, health, internal
 from voice.settings import Settings
 from voice.transport import VoiceSessionManager
 
@@ -52,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved_settings
     app.include_router(health.router)
     app.include_router(debug.router)
+    app.include_router(internal.router)
     configure_tracing(app, resolved_settings)
     return app
 
