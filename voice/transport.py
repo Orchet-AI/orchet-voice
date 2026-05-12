@@ -4,23 +4,30 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 import httpx
 import structlog
 from deepgram import LiveOptions
-from pipecat.frames.frames import FunctionCallResultProperties, TTSTextFrame
+from pipecat.frames.frames import (
+    Frame,
+    FunctionCallResultProperties,
+    LLMFullResponseEndFrame,
+    TransportMessageUrgentFrame,
+    TTSTextFrame,
+)
 from pipecat.pipeline.parallel_pipeline import ParallelPipeline
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-from pipecat.processors.frame_processor import FrameDirection
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
 from voice.auth import AuthenticatedUser
+from voice.internal_auth import sign_voice_service_jwt
 from voice.obs.cost import VoiceSessionCostTracker, set_cost_span_attributes
 from voice.obs.tracing import get_tracer
 from voice.pipeline import (
@@ -32,6 +39,7 @@ from voice.pipeline import (
     VoiceMetadata,
     VoiceTurnTracker,
 )
+from voice.protocol.migration import VoiceSessionMigrate, VoiceSessionMigrateValue
 from voice.providers.stt_sarvam import SarvamSTTService
 from voice.providers.tts_sarvam import SarvamTTSService
 from voice.routing.language_router import (
@@ -50,11 +58,20 @@ from voice.routing.llm_router import (
     llm_provider_for,
     pick_llm_service,
 )
+from voice.routing.region_router import (
+    SARVAM_PREFERRED_REGIONS,
+    pick_target_region,
+    should_migrate_for_sarvam,
+)
 from voice.settings import Settings
 from voice.tool_catalog import VOICE_FUNCTION_SCHEMAS, VOICE_TOOLS_SCHEMA
 from voice.voice_turn_dispatcher import VoiceTurnDispatcher
 
 logger = structlog.get_logger()
+
+MIGRATION_VALID_FOR_SECONDS = 120
+OLD_SESSION_GRACE_SECONDS = 10
+INTERNAL_APP_NAME = "orchet-voice"
 
 
 @dataclass(frozen=True)
@@ -89,17 +106,28 @@ class DailyApiClient:
         )
         self._owns_client = http_client is None
 
-    async def create_room(self, name: str, expires_at: int) -> DailyRoom:
+    async def create_room(
+        self,
+        name: str,
+        expires_at: int,
+        *,
+        geo_region: str | None = None,
+    ) -> DailyRoom:
+        properties: dict[str, Any] = {
+            "exp": expires_at,
+            "eject_at_room_exp": True,
+            "enable_prejoin_ui": False,
+        }
+        if geo_region:
+            # Daily's room REST API calls this property `geo` and uses AWS-style
+            # region ids (for example ap-south-1 for Mumbai), not Fly region ids.
+            properties["geo"] = geo_region
         response = await self._http_client.post(
             "/rooms",
             json={
                 "name": name,
                 "privacy": "private",
-                "properties": {
-                    "exp": expires_at,
-                    "eject_at_room_exp": True,
-                    "enable_prejoin_ui": False,
-                },
+                "properties": properties,
             },
         )
         response.raise_for_status()
@@ -138,9 +166,17 @@ class DailyApiClient:
 
 
 class VoiceSessionManager:
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        daily_client: DailyApiClient | None = None,
+        internal_http_client: httpx.AsyncClient | None = None,
+    ):
         self._settings = settings
-        self._daily: DailyApiClient | None = None
+        self._daily: DailyApiClient | None = daily_client
+        self._owns_internal_client = internal_http_client is None
+        self._internal_http_client = internal_http_client or httpx.AsyncClient(timeout=10.0)
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
     async def start_session(
@@ -183,18 +219,13 @@ class VoiceSessionManager:
             llm_model=self._settings.voice_llm_model,
             tts_voice_id=self._settings.voice_tts_voice,
         )
-        task = asyncio.create_task(
-            run_daily_voice_pipeline(
-                room_url=room.url,
-                bot_token=bot_token,
-                settings=self._settings,
-                metadata=metadata,
-                agent_manifest=agent_manifest,
-            ),
-            name=f"daily-voice-{session_id}",
+        self._spawn_pipeline(
+            session_id=session_id,
+            room_url=room.url,
+            bot_token=bot_token,
+            metadata=metadata,
+            agent_manifest=agent_manifest,
         )
-        self._tasks[session_id] = task
-        task.add_done_callback(lambda done: self._handle_done(session_id, done))
 
         logger.info(
             "voice.session_started",
@@ -218,6 +249,8 @@ class VoiceSessionManager:
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
         if self._daily:
             await self._daily.aclose()
+        if self._owns_internal_client:
+            await self._internal_http_client.aclose()
 
     def _daily_client(self) -> DailyApiClient:
         if not self._daily:
@@ -236,6 +269,157 @@ class VoiceSessionManager:
                 voice_session_id=session_id,
                 error=str(error),
             )
+
+    async def migrate_session_to_region(
+        self,
+        session_id: str,
+        target_region: str,
+        *,
+        metadata: VoiceMetadata,
+        agent_manifest: dict[str, Any] | None,
+        locale_hint: str,
+    ) -> VoiceSessionMigrate:
+        """Prepare a target-region worker and return the client reconnect frame.
+
+        Option A from the PR brief is intentional here: Daily room `geo` alone
+        moves the SFU, but not the Fly worker that streams audio to Sarvam.
+        The internal spawn request starts the bot on the target Fly machine so
+        the Daily-to-Fly-to-Sarvam path also moves close to India.
+        """
+        target = target_region.strip().lower()
+        if target not in SARVAM_PREFERRED_REGIONS:
+            raise ValueError(f"unsupported Sarvam migration region: {target_region}")
+
+        expires_at = int(time.time()) + MIGRATION_VALID_FOR_SECONDS
+        room_name = f"orchet-phase2-{target}-{uuid4().hex[:12]}"
+        daily = self._daily_client()
+        room = await daily.create_room(
+            room_name,
+            expires_at,
+            geo_region=daily_geo_region_for_fly_region(target),
+        )
+        client_token = await daily.create_meeting_token(
+            room.name,
+            expires_at,
+            is_owner=False,
+            user_name=metadata.user_id,
+        )
+        await self._spawn_session_on_region(
+            target_region=target,
+            payload={
+                "session_id": session_id,
+                "user_id": metadata.user_id,
+                "client_kind": metadata.client_kind,
+                "room_name": room.name,
+                "room_url": room.url,
+                "expires_at": expires_at,
+                "locale_hint": locale_hint,
+                "agent_id": metadata.agent_id,
+                "agent_manifest": agent_manifest,
+            },
+            subject=metadata.user_id,
+        )
+        return VoiceSessionMigrate(
+            value=VoiceSessionMigrateValue(
+                target_region=cast(Literal["bom", "sin"], target),
+                new_room_url=room.url,
+                new_client_token=client_token,
+                valid_for_seconds=MIGRATION_VALID_FOR_SECONDS,
+                preserve_session_id=True,
+            )
+        )
+
+    async def spawn_internal_session(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        client_kind: str,
+        room_name: str,
+        room_url: str,
+        expires_at: int,
+        locale_hint: str,
+        agent_id: str,
+        agent_manifest: dict[str, Any] | None = None,
+    ) -> None:
+        self._validate_provider_settings()
+        bot_token = await self._daily_client().create_meeting_token(
+            room_name,
+            expires_at,
+            is_owner=True,
+            user_name="Orchet Voice Bot",
+        )
+        metadata = VoiceMetadata(
+            voice_session_id=session_id,
+            user_id=user_id,
+            client_kind=client_kind,
+            region=self._settings.region,
+            locale=locale_hint,
+            agent_id=agent_id,
+            llm_model=self._settings.voice_llm_model,
+            tts_voice_id=self._settings.voice_tts_voice,
+        )
+        self._spawn_pipeline(
+            session_id=session_id,
+            room_url=room_url,
+            bot_token=bot_token,
+            metadata=metadata,
+            agent_manifest=agent_manifest,
+        )
+
+    def schedule_session_shutdown(self, session_id: str, delay_seconds: int) -> None:
+        async def _shutdown_later() -> None:
+            await asyncio.sleep(delay_seconds)
+            task = self._tasks.get(session_id)
+            if not task or task.done():
+                return
+            logger.info(
+                "voice.session_migration_old_worker_shutdown",
+                voice_session_id=session_id,
+                delay_seconds=delay_seconds,
+            )
+            task.cancel()
+
+        asyncio.create_task(_shutdown_later(), name=f"voice-migration-cleanup-{session_id}")
+
+    def _spawn_pipeline(
+        self,
+        *,
+        session_id: str,
+        room_url: str,
+        bot_token: str,
+        metadata: VoiceMetadata,
+        agent_manifest: dict[str, Any] | None,
+    ) -> None:
+        task = asyncio.create_task(
+            run_daily_voice_pipeline(
+                room_url=room_url,
+                bot_token=bot_token,
+                settings=self._settings,
+                metadata=metadata,
+                agent_manifest=agent_manifest,
+                session_manager=self,
+            ),
+            name=f"daily-voice-{session_id}",
+        )
+        self._tasks[session_id] = task
+        task.add_done_callback(lambda done: self._handle_done(session_id, done))
+
+    async def _spawn_session_on_region(
+        self,
+        *,
+        target_region: str,
+        payload: dict[str, Any],
+        subject: str,
+    ) -> None:
+        response = await self._internal_http_client.post(
+            internal_spawn_url(target_region),
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {sign_voice_service_jwt(self._settings, subject=subject)}"
+            },
+        )
+        response.raise_for_status()
 
     def _validate_provider_settings(self) -> None:
         missing = []
@@ -256,6 +440,7 @@ async def run_daily_voice_pipeline(
     settings: Settings,
     metadata: VoiceMetadata,
     agent_manifest: dict[str, Any] | None = None,
+    session_manager: VoiceSessionManager | None = None,
 ) -> None:
     resolved_manifest = agent_manifest_for(
         agent_id=metadata.agent_id,
@@ -280,6 +465,15 @@ async def run_daily_voice_pipeline(
         tracker=tracker,
     )
     tracker.set_snapshot_dispatcher(dispatcher)
+    migration_coordinator = (
+        SessionMigrationCoordinator(
+            session_manager=session_manager,
+            metadata=metadata,
+            agent_manifest=agent_manifest,
+        )
+        if session_manager
+        else None
+    )
     transport = DailyTransport(
         room_url,
         bot_token,
@@ -305,6 +499,9 @@ async def run_daily_voice_pipeline(
         sarvam_tts_speaker=settings.voice_sarvam_tts_speaker,
         deepgram_tts_voice=settings.voice_tts_voice,
         detection_seconds=settings.voice_language_detection_seconds,
+        on_locale_detected=migration_coordinator.request_migration
+        if migration_coordinator
+        else None,
     )
     deepgram_stt = DeepgramSTTService(
         api_key=settings.lumo_deepgram_api_key,
@@ -413,6 +610,7 @@ async def run_daily_voice_pipeline(
             LLMSpanProcessor(tracker, metadata, cost_tracker),
             tts,
             TTSSpanProcessor(tracker, metadata, cost_tracker),
+            MigrationFrameSenderProcessor(migration_coordinator, transport_output),
             transport_output,
             context_aggregator.assistant(),
         ]
@@ -446,6 +644,124 @@ async def run_daily_voice_pipeline(
         )
         session_span.end()
         await dispatcher.aclose()
+
+
+class SessionMigrationCoordinator:
+    def __init__(
+        self,
+        *,
+        session_manager: VoiceSessionManager | None,
+        metadata: VoiceMetadata,
+        agent_manifest: dict[str, Any] | None,
+    ):
+        self._session_manager = session_manager
+        self._metadata = metadata
+        self._agent_manifest = agent_manifest
+        self._prepare_task: asyncio.Task[VoiceSessionMigrate | None] | None = None
+        self._sent = False
+
+    def request_migration(self, locale: str) -> None:
+        if self._prepare_task or self._sent or not self._session_manager:
+            return
+        if not should_migrate_for_sarvam(self._metadata.region, locale):
+            return
+        target = pick_target_region(self._metadata.region)
+        self._prepare_task = asyncio.create_task(
+            self._prepare(target, locale),
+            name=f"voice-migration-prepare-{self._metadata.voice_session_id}",
+        )
+
+    async def send_if_ready(self, transport_output: object) -> None:
+        if self._sent or not self._prepare_task:
+            return
+        frame = await self._prepare_task
+        if not frame:
+            return
+        await send_daily_app_message(transport_output, frame.model_dump(mode="json"))
+        self._sent = True
+        if self._session_manager:
+            # PR1 chooses the simple v1 cleanup contract: trust the client's
+            # reconnect path and cancel the old worker after a short grace window.
+            self._session_manager.schedule_session_shutdown(
+                self._metadata.voice_session_id,
+                OLD_SESSION_GRACE_SECONDS,
+            )
+
+    async def _prepare(self, target_region: str, locale: str) -> VoiceSessionMigrate | None:
+        if not self._session_manager:
+            return None
+        for target in _migration_targets(target_region):
+            try:
+                return await self._session_manager.migrate_session_to_region(
+                    self._metadata.voice_session_id,
+                    target,
+                    metadata=self._metadata,
+                    agent_manifest=self._agent_manifest,
+                    locale_hint=locale,
+                )
+            except Exception as exc:
+                logger.error(
+                    "voice.session_migration_prepare_failed",
+                    voice_session_id=self._metadata.voice_session_id,
+                    target_region=target,
+                    error=str(exc),
+                )
+        logger.error(
+            "voice.session_migration_staying_current_region",
+            voice_session_id=self._metadata.voice_session_id,
+            current_region=self._metadata.region,
+            locale=locale,
+        )
+        return None
+
+
+class MigrationFrameSenderProcessor(FrameProcessor):
+    def __init__(
+        self,
+        coordinator: SessionMigrationCoordinator | None,
+        transport_output: object,
+    ):
+        super().__init__(name="orchet-migration-frame-sender")
+        self._coordinator = coordinator
+        self._transport_output = transport_output
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if (
+            direction == FrameDirection.DOWNSTREAM
+            and isinstance(frame, LLMFullResponseEndFrame)
+            and self._coordinator
+        ):
+            await self._coordinator.send_if_ready(self._transport_output)
+        await self.push_frame(frame, direction)
+
+
+async def send_daily_app_message(transport_output: object, message: dict[str, Any]) -> None:
+    sender = transport_output
+    send_message = getattr(sender, "send_message", None)
+    if not send_message:
+        raise RuntimeError("Daily transport output does not expose send_message")
+    await send_message(TransportMessageUrgentFrame(message))
+
+
+def daily_geo_region_for_fly_region(fly_region: str) -> str | None:
+    return {
+        "bom": "ap-south-1",
+        "sin": "ap-southeast-1",
+    }.get(fly_region.strip().lower())
+
+
+def internal_spawn_url(target_region: str) -> str:
+    return f"http://{target_region.strip().lower()}.{INTERNAL_APP_NAME}.internal:8080/internal/spawn_session"
+
+
+def _migration_targets(primary: str) -> tuple[str, ...]:
+    primary = primary.strip().lower()
+    if primary == "bom":
+        return ("bom", "sin")
+    if primary == "sin":
+        return ("sin", "bom")
+    return ("bom", "sin")
 
 
 def register_voice_tools(

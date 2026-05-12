@@ -51,3 +51,6 @@ reportMissingTypeStubs = false
 reportUnknownMemberType = false
 reportUnknownArgumentType = false
 reportUnknownVariableType = false
+
+[tool.mypy]
+ignore_missing_imports = true
