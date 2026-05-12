@@ -14,6 +14,7 @@ from pipecat.frames.frames import (
     AudioRawFrame,
     Frame,
     InputAudioRawFrame,
+    InterimTranscriptionFrame,
     LLMFullResponseEndFrame,
     TextFrame,
     TranscriptionFrame,
@@ -36,6 +37,8 @@ ProviderName = Literal["deepgram", "sarvam"]
 PROMPT_DIR = Path(__file__).parents[1] / "prompts"
 SARVAM_ROUTED_LOCALES = {"hi-IN", "te-IN", "ta-IN"}
 ENGLISH_LOCALES = {"en", "en-US", "en-GB", "en-IN"}
+ENGLISH_SHORTCUT_CONFIDENCE: float = 0.75
+ENGLISH_SHORTCUT_WINDOW_MS: int = 500
 
 
 @dataclass(frozen=True)
@@ -199,9 +202,18 @@ class LanguageDetectionProcessor(FrameProcessor):
         self._pending_start: UserStartedSpeakingFrame | None = None
         self._detected_for_turn: str | None = None
         self._released = False
+        self._speech_started_at: float | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
         await super().process_frame(frame, direction)
+
+        if (
+            isinstance(frame, InterimTranscriptionFrame)
+            and not self._released
+            and await self._try_english_shortcut(frame)
+        ):
+            await self.push_frame(frame, direction)
+            return
 
         if direction != FrameDirection.DOWNSTREAM:
             await self.push_frame(frame, direction)
@@ -212,6 +224,7 @@ class LanguageDetectionProcessor(FrameProcessor):
             self._pending_start = frame
             self._detected_for_turn = None
             self._released = False
+            self._speech_started_at = time.perf_counter()
             return
 
         if isinstance(frame, InputAudioRawFrame) and not self._released:
@@ -259,6 +272,45 @@ class LanguageDetectionProcessor(FrameProcessor):
             await self.push_frame(buffered, FrameDirection.DOWNSTREAM)
         self._audio_buffer = []
         self._pending_start = None
+
+    async def _try_english_shortcut(self, frame: InterimTranscriptionFrame) -> bool:
+        text = frame.text.strip()
+        if not text:
+            return False
+
+        elapsed_ms = _elapsed_ms(self._speech_started_at or time.perf_counter())
+        if elapsed_ms > ENGLISH_SHORTCUT_WINDOW_MS:
+            return False
+
+        locale = _frame_locale(frame)
+        if locale and locale not in ENGLISH_LOCALES:
+            return False
+
+        confidence = _frame_confidence(frame)
+        if confidence is not None and confidence < ENGLISH_SHORTCUT_CONFIDENCE:
+            return False
+
+        # Pipecat 0.0.61's InterimTranscriptionFrame carries language but not
+        # confidence. Deepgram is configured language="en-US", so an early
+        # non-empty interim without confidence is treated as an English lock.
+        self._tracker.record_language_detection(
+            locale=locale or "en-US",
+            confidence=confidence if confidence is not None else ENGLISH_SHORTCUT_CONFIDENCE,
+            elapsed_ms=elapsed_ms,
+            provider="deepgram-english-shortcut",
+            stt_provider="deepgram",
+            tts_provider="deepgram",
+            tts_voice_id=self._deepgram_tts_voice,
+        )
+        self._detected_for_turn = locale or "en-US"
+        self._released = True
+        if self._pending_start:
+            await self.push_frame(self._pending_start, FrameDirection.DOWNSTREAM)
+        for buffered in self._audio_buffer:
+            await self.push_frame(buffered, FrameDirection.DOWNSTREAM)
+        self._audio_buffer = []
+        self._pending_start = None
+        return True
 
     def _buffered_seconds(self) -> float:
         if not self._audio_buffer:
@@ -331,3 +383,26 @@ def tts_gate_types() -> tuple[type, ...]:
 
 def _elapsed_ms(started: float) -> int:
     return max(0, int((time.perf_counter() - started) * 1000))
+
+
+def _frame_locale(frame: InterimTranscriptionFrame) -> str | None:
+    language = getattr(frame, "language", None)
+    if language is None:
+        return None
+    value = getattr(language, "value", language)
+    if not isinstance(value, str):
+        return None
+    return normalize_locale(value)
+
+
+def _frame_confidence(frame: InterimTranscriptionFrame) -> float | None:
+    for attr in ("confidence", "confidence_score"):
+        value = getattr(frame, attr, None)
+        if isinstance(value, (int, float)):
+            return float(value)
+    metadata = getattr(frame, "metadata", None)
+    if isinstance(metadata, dict):
+        value = metadata.get("confidence")
+        if isinstance(value, (int, float)):
+            return float(value)
+    return None
