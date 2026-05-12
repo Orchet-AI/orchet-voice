@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
 
+import structlog
 import websockets
 from pipecat.frames.frames import (
     AudioRawFrame,
@@ -26,6 +27,8 @@ from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from voice.pipeline import VoiceTurnTracker
+
+logger = structlog.get_logger()
 from voice.providers.stt_sarvam import (
     DEFAULT_SARVAM_STT_MODEL,
     build_sarvam_stt_ws_url,
@@ -245,7 +248,33 @@ class LanguageDetectionProcessor(FrameProcessor):
             return
         sample_rate = self._audio_buffer[0].sample_rate if self._audio_buffer else 16000
         audio = b"".join(frame.audio for frame in self._audio_buffer)
-        result = await self._detector.detect(audio, sample_rate=sample_rate)
+        # If Sarvam detection times out or errors (network blip, API
+        # outage, asyncio.TimeoutError out of wait_for), DO NOT let the
+        # exception propagate — it crashes the entire Pipecat pipeline
+        # mid-turn and the bot goes zombie in the Daily room. Fall back
+        # to "en" (routes to Deepgram), log the failure, keep the
+        # pipeline alive. Production-blocking regression confirmed
+        # 2026-05-13 via bom Fly logs (TimeoutError out of
+        # asyncio.wait_for at SarvamStreamingLanguageDetector.detect).
+        # NOTE: bare asyncio.CancelledError is intentionally NOT caught
+        # here — that's the framework's signal that the task itself is
+        # being cancelled (shutdown, parent task killed), and we must
+        # respect it.
+        started = time.perf_counter()
+        try:
+            result = await self._detector.detect(audio, sample_rate=sample_rate)
+        except Exception as exc:  # noqa: BLE001 — see comment above
+            logger.error(
+                "voice.language_detection_failed_falling_back_to_english",
+                error=str(exc)[:300],
+                exc_type=type(exc).__name__,
+            )
+            result = LanguageDetectionResult(
+                locale="en",
+                confidence=0.0,
+                provider="fallback-error",
+                elapsed_ms=_elapsed_ms(started),
+            )
         locale = normalize_locale(result.locale)
         stt_provider = pick_stt_provider(locale)
         tts_provider = pick_tts_provider(locale)
