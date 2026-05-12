@@ -144,8 +144,8 @@ async def test_detector_timeout_does_not_crash_pipeline_falls_back_to_english() 
     await collect_frames(processor, _audio_frame(seconds=2.1))
 
     assert detector.calls == 1
-    # Fallback: locale defaults to "en" → Deepgram path
-    assert tracker.locale == "en"
+    # Fallback: locale defaults to "en" which normalize_locale lifts to "en-US" → Deepgram path
+    assert tracker.locale == "en-US"
     assert tracker.stt_provider == "deepgram"
     assert tracker.tts_provider == "deepgram"
 
@@ -161,7 +161,7 @@ async def test_detector_generic_exception_does_not_crash_pipeline() -> None:
     await collect_frames(processor, _audio_frame(seconds=2.1))
 
     assert detector.calls == 1
-    assert tracker.locale == "en"
+    assert tracker.locale == "en-US"
     assert tracker.stt_provider == "deepgram"
 
 
