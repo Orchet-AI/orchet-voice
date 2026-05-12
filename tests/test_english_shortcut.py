@@ -134,9 +134,7 @@ async def test_detector_timeout_does_not_crash_pipeline_falls_back_to_english() 
     the pipeline would die mid-turn — leaving the room with a zombie
     bot that couldn't process any further audio. The user saw 'listening'
     indefinitely with no response."""
-    import asyncio as _asyncio
-
-    detector = RaisingDetector(_asyncio.TimeoutError())
+    detector = RaisingDetector(TimeoutError())
     tracker = VoiceTurnTracker(VoiceMetadata(voice_session_id="voice_test", user_id="user_test"))
     processor = _processor(tracker, detector)
 

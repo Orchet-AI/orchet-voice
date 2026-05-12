@@ -27,13 +27,13 @@ from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 
 from voice.pipeline import VoiceTurnTracker
-
-logger = structlog.get_logger()
 from voice.providers.stt_sarvam import (
     DEFAULT_SARVAM_STT_MODEL,
     build_sarvam_stt_ws_url,
     parse_sarvam_stt_message,
 )
+
+logger = structlog.get_logger()
 
 ProviderName = Literal["deepgram", "sarvam"]
 
