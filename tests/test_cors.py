@@ -1,6 +1,7 @@
 """CORS preflight tests — voice/server.py must accept browser preflight
 from orchet.ai + Vercel preview origins so the streaming voice handshake
 works cross-origin from the web client."""
+
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
