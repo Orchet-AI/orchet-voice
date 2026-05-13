@@ -14,6 +14,8 @@ from pipecat.frames.frames import (
     Frame,
     FunctionCallResultProperties,
     LLMFullResponseEndFrame,
+    LLMTextFrame,
+    TranscriptionFrame,
     TransportMessageUrgentFrame,
     TTSTextFrame,
 )
@@ -663,6 +665,7 @@ async def run_daily_voice_pipeline(
             tts,
             TTSSpanProcessor(tracker, metadata, cost_tracker),
             MigrationFrameSenderProcessor(migration_coordinator, transport_output),
+            TranscriptAppMessageProcessor(transport_output, metadata, tracker),
             transport_output,
             context_aggregator.assistant(),
         ]
@@ -790,6 +793,137 @@ class MigrationFrameSenderProcessor(FrameProcessor):
         ):
             await self._coordinator.send_if_ready(self._transport_output)
         await self.push_frame(frame, direction)
+
+
+class TranscriptAppMessageProcessor(FrameProcessor):
+    """Emit Daily app-messages so the web/iOS client can render the
+    live conversation transcript in the chat thread.
+
+    Why this exists
+    ---------------
+    Pipecat already maintains the user/assistant text internally — the
+    STT service emits ``TranscriptionFrame`` for final user utterances
+    and the LLM emits ``LLMTextFrame`` deltas + ``LLMFullResponseEndFrame``
+    at the end of a response. That's enough for the voice service to do
+    its job (route tools, drive TTS) but the connected client never
+    sees those frames. Before this processor, the only Daily app-messages
+    going to the client were ``voice_show_confirmation`` and
+    ``voice_session_migrate``. So in pure Daily-WebRTC voice mode there
+    was no live transcript display — the chat thread sat empty while
+    the user and Orchet talked. Production repro 2026-05-14, reported
+    as "the transcript is not coming while the conversation is
+    happening between user and voice agent".
+
+    Wire shape
+    ----------
+    Three message kinds — names mirror the existing
+    ``voice_show_confirmation`` convention so the web data channel can
+    discriminate cheaply:
+
+      voice_user_transcript
+          { type, voice_session_id, turn_id, text }
+        Emitted on final TranscriptionFrame only. We deliberately skip
+        InterimTranscriptionFrame: the chat thread renders bubbles, and
+        a bubble that keeps mutating mid-utterance reads worse than one
+        bubble that lands when the user pauses.
+
+      voice_assistant_transcript_delta
+          { type, voice_session_id, turn_id, text }
+        Emitted on each LLMTextFrame so the assistant bubble streams in
+        token-by-token, matching the chat surface's UX. ``text`` is the
+        delta only — NOT the cumulative response. Concatenation lives
+        on the client.
+
+      voice_assistant_transcript_final
+          { type, voice_session_id, turn_id, text }
+        Emitted on LLMFullResponseEndFrame. ``text`` is the full
+        assembled assistant response from the tracker (cumulative). The
+        client uses this to detect end-of-stream and to reconcile in
+        case any delta dropped on the wire.
+
+    Placement
+    ---------
+    Pipeline order: must sit DOWNSTREAM of the STT and LLM span
+    processors so user_transcript/assistant_text accumulate first, but
+    UPSTREAM of ``transport_output`` so the app-message goes out the
+    same Daily socket the audio frames use. The existing
+    ``MigrationFrameSenderProcessor`` sits in that same slot for the
+    same reason — we slot in right next to it.
+
+    Failure mode
+    ------------
+    ``send_daily_app_message`` raises if the transport output isn't
+    ready (no Daily socket yet). We catch broadly and log — a missed
+    transcript update is not worth tearing down the call.
+    """
+
+    def __init__(
+        self,
+        transport_output: object,
+        metadata: VoiceMetadata,
+        tracker: VoiceTurnTracker,
+    ):
+        super().__init__(name="orchet-transcript-app-message")
+        self._transport_output = transport_output
+        self._metadata = metadata
+        self._tracker = tracker
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if direction == FrameDirection.DOWNSTREAM:
+            if isinstance(frame, TranscriptionFrame):
+                text = frame.text.strip() if isinstance(frame.text, str) else ""
+                if text:
+                    await self._safe_send(
+                        {
+                            "type": "voice_user_transcript",
+                            "voice_session_id": self._metadata.voice_session_id,
+                            "turn_id": self._current_turn_id(),
+                            "text": text,
+                        }
+                    )
+            elif isinstance(frame, LLMTextFrame):
+                # Streaming chunk — send the raw delta. Don't strip
+                # whitespace: leading/trailing spaces are how the
+                # assistant's tokens glue into prose on the client.
+                if frame.text:
+                    await self._safe_send(
+                        {
+                            "type": "voice_assistant_transcript_delta",
+                            "voice_session_id": self._metadata.voice_session_id,
+                            "turn_id": self._current_turn_id(),
+                            "text": frame.text,
+                        }
+                    )
+            elif isinstance(frame, LLMFullResponseEndFrame):
+                final_text = ""
+                turn = self._tracker.current
+                if turn:
+                    final_text = (turn.assistant_text or "").strip()
+                await self._safe_send(
+                    {
+                        "type": "voice_assistant_transcript_final",
+                        "voice_session_id": self._metadata.voice_session_id,
+                        "turn_id": self._current_turn_id(),
+                        "text": final_text,
+                    }
+                )
+        await self.push_frame(frame, direction)
+
+    def _current_turn_id(self) -> str | None:
+        turn = self._tracker.current
+        return turn.turn_id if turn else None
+
+    async def _safe_send(self, message: dict[str, Any]) -> None:
+        try:
+            await send_daily_app_message(self._transport_output, message)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "voice.transcript_app_message_failed",
+                voice_session_id=self._metadata.voice_session_id,
+                message_type=message.get("type"),
+                error=str(exc),
+            )
 
 
 async def send_daily_app_message(transport_output: object, message: dict[str, Any]) -> None:
