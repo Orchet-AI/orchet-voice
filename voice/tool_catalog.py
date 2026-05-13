@@ -124,6 +124,63 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
         },
         required=["query"],
     ),
+    # ----- Voice-driven marketplace discovery + install -----
+    #
+    # When the user asks to do a task that needs an installable agent
+    # ("book a flight", "order food", "find a hotel"), Haiku reaches
+    # for these two tools to (1) surface the candidate agents from
+    # Orchet's marketplace and (2) install the one the user picks.
+    # The handlers live in voice/tools/builtin_tools.py and call
+    # orchet-backend directly (GET /marketplace for find,
+    # POST /voice/marketplace/install for install).
+    FunctionSchema(
+        name="marketplace_find_agents",
+        description=(
+            "Discover agents in Orchet's marketplace that can do the task "
+            "the user wants. ALWAYS call this — never refuse — when the "
+            "user asks to:\n"
+            "  - Book a flight, hotel, restaurant, tour, event\n"
+            "  - Order food, groceries\n"
+            "  - Find or use any service-style agent (weather, maps, "
+            "EV charging, attractions)\n"
+            "  - 'Install', 'add', 'connect', or 'browse' agents\n\n"
+            "Pass the user's intent verbatim as task_description "
+            "('book a flight from Vegas to Chicago tomorrow', "
+            "'order pizza tonight', etc). Returns a ranked list of "
+            "matching agents with display_name, agent_id, one_liner, "
+            "rating, install_count, and an 'installed' flag.\n\n"
+            "After calling, read out the agent names to the user and "
+            "ASK WHICH ONE THEY WANT. If only one match returns, "
+            "confirm that one. If the user has already installed a "
+            "matching agent, prefer it. Once the user picks, call "
+            "marketplace_install_agent with that agent's id."
+        ),
+        properties={
+            "task_description": _string(
+                "The user's task in their own words. Pass through "
+                "verbatim — don't pre-classify or shorten."
+            ),
+        },
+        required=["task_description"],
+    ),
+    FunctionSchema(
+        name="marketplace_install_agent",
+        description=(
+            "Install an agent from Orchet's marketplace for the current "
+            "user. Call this AFTER the user has confirmed which agent "
+            "to install (from a prior marketplace_find_agents response). "
+            "Pass the agent_id from that response.\n\n"
+            "On success: returns ok=true. Tell the user the agent is "
+            "installed and continue with their original task.\n"
+            "If requires_oauth=true: the agent needs the user to sign "
+            "in via the app. Tell the user to open the connections "
+            "page in the Orchet app to finish."
+        ),
+        properties={
+            "agent_id": _string("Stable agent_id from a marketplace_find_agents result."),
+        },
+        required=["agent_id"],
+    ),
     FunctionSchema(
         name="gmail_search_messages",
         description="Search the user's Gmail for messages matching a query.",

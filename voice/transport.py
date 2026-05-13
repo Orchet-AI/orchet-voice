@@ -625,7 +625,13 @@ async def run_daily_voice_pipeline(
         ],
     )
     transport_output = transport.output()
-    register_voice_tools(llm, dispatcher, transport_output)
+    register_voice_tools(
+        llm,
+        dispatcher,
+        transport_output,
+        settings=settings,
+        metadata=metadata,
+    )
 
     # Build the right context shape for the configured LLM. Anthropic's
     # Messages API requires the system prompt as a top-level `system`
@@ -958,6 +964,9 @@ def register_voice_tools(
     llm: Any,
     dispatcher: Any,
     transport_output: object,
+    *,
+    settings: Settings,
+    metadata: VoiceMetadata,
 ) -> None:
     """Wire every tool the LLM might call.
 
@@ -993,8 +1002,21 @@ def register_voice_tools(
         # ----- Built-in fast path ---------------------------------------
         local_handler = BUILTIN_TOOL_HANDLERS.get(function_name)
         if local_handler is not None:
+            # Per-call execution context for handlers that need to
+            # call orchet-backend (marketplace find/install). Plain
+            # handlers (current_time, weather, web_search) ignore it
+            # via their **kwargs catch-all.
+            ctx: dict[str, Any] = {
+                "user_id": metadata.user_id,
+                "session_id": metadata.voice_session_id,
+                "gateway_url": settings.gateway_url,
+                "internal_token": sign_voice_service_jwt(
+                    settings,
+                    subject=metadata.user_id,
+                ),
+            }
             try:
-                result = await local_handler(args)
+                result = await local_handler(args, ctx=ctx)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "voice.tools.builtin_handler_failed",
