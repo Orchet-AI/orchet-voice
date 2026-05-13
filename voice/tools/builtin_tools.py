@@ -311,10 +311,7 @@ async def _duckduckgo_search(
     answer = (payload.get("Answer") or "").strip()
     definition = (payload.get("Definition") or "").strip()
     source = (
-        payload.get("AbstractURL")
-        or payload.get("AnswerURL")
-        or payload.get("DefinitionURL")
-        or ""
+        payload.get("AbstractURL") or payload.get("AnswerURL") or payload.get("DefinitionURL") or ""
     )
     text = abstract or answer or definition
     if not text:

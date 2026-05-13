@@ -41,8 +41,6 @@ def test_agent_query_routes_through_backend_not_locally() -> None:
 
 
 def test_agent_query_schema_takes_query_string() -> None:
-    schema = next(
-        s for s in VOICE_FUNCTION_SCHEMAS if s.name == "agent_query"
-    )
+    schema = next(s for s in VOICE_FUNCTION_SCHEMAS if s.name == "agent_query")
     assert "query" in schema.properties
     assert schema.required == ["query"]

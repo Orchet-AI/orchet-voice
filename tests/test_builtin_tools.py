@@ -56,8 +56,13 @@ async def test_current_date_returns_weekday_and_iso() -> None:
     # iso must be the YYYY-MM-DD shape.
     _dt.date.fromisoformat(result["iso"])
     assert result["weekday"] in {
-        "Monday", "Tuesday", "Wednesday", "Thursday",
-        "Friday", "Saturday", "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
     }
 
 

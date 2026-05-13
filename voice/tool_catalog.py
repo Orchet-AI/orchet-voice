@@ -38,9 +38,7 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
             "current date."
         ),
         properties={
-            "timezone": _string(
-                "Optional IANA timezone name. Defaults to UTC if omitted."
-            ),
+            "timezone": _string("Optional IANA timezone name. Defaults to UTC if omitted."),
         },
         required=[],
     ),
@@ -52,9 +50,7 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
             "temperature, or whether they need an umbrella."
         ),
         properties={
-            "location": _string(
-                "City name, region, airport code, or postcode. Required."
-            ),
+            "location": _string("City name, region, airport code, or postcode. Required."),
         },
         required=["location"],
     ),
