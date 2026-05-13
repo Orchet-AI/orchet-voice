@@ -214,9 +214,7 @@ async def test_two_synthesize_calls_share_one_websocket() -> None:
     items2 = [x async for x in conn.synthesize("second")]
     assert any(isinstance(x, bytes) for x in items2)
 
-    assert open_count == 1, (
-        f"Expected one WS open across two segments, got {open_count}"
-    )
+    assert open_count == 1, f"Expected one WS open across two segments, got {open_count}"
     await conn.aclose()
 
 

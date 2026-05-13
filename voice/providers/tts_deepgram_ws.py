@@ -109,6 +109,7 @@ DEFAULT_DEEPGRAM_TTS_SAMPLE_RATE = 24000
 # and let the caller move on (or reconnect on the next turn).
 _FLUSH_WAIT_TIMEOUT_S = 10.0
 
+
 # Sentinel placed on the segment queue by the reader task when the
 # upstream WebSocket closes. Lets the consumer distinguish "no more
 # audio for this segment" from "server replied with bytes worth zero".
@@ -329,9 +330,7 @@ class _PersistentDeepgramTTSConnection:
                     if item.get("type") == "Error":
                         raise _SegmentError(
                             str(
-                                item.get("description")
-                                or item.get("message")
-                                or item,
+                                item.get("description") or item.get("message") or item,
                             ),
                         )
                     yield item
