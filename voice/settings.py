@@ -40,6 +40,11 @@ class Settings:
     voice_tts_encoding: str
     voice_sarvam_tts_model: str
     voice_sarvam_tts_speaker: str
+    # "streaming" → DeepgramStreamingTTSService (Aura-2 WebSocket, default)
+    # "rest"      → pipecat.services.deepgram.DeepgramTTSService (REST fallback)
+    # Kept as a kill-switch so we can roll back without redeploy if the
+    # streaming adapter misbehaves in production.
+    voice_deepgram_tts_mode: str
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -78,6 +83,7 @@ class Settings:
             voice_tts_encoding=os.getenv("ORCHET_VOICE_TTS_ENCODING", "linear16"),
             voice_sarvam_tts_model=os.getenv("ORCHET_VOICE_SARVAM_TTS_MODEL", "bulbul:v3-beta"),
             voice_sarvam_tts_speaker=os.getenv("ORCHET_VOICE_SARVAM_TTS_SPEAKER", "aditya"),
+            voice_deepgram_tts_mode=os.getenv("ORCHET_VOICE_DEEPGRAM_TTS_MODE", "streaming"),
         )
 
     @property
