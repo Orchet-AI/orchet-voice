@@ -545,12 +545,30 @@ async def run_daily_voice_pipeline(
             sarvam_stt,
         ],
     )
+    # aggregate_sentences=True (the Pipecat default) buffers TextFrames from
+    # the LLM until a natural sentence boundary, then sends the complete
+    # sentence to TTS as one synthesis call.
+    #
+    # PR #18 (VOICE-LATENCY-PASS-1) flipped this to False to chase ~200-300ms
+    # of first-byte latency — every LLM token would hit TTS as it streamed.
+    # Production repro 2026-05-13: user reported "for every word it's pausing
+    # and speaking. TTS is breaking." Each per-token Deepgram REST call
+    # produces an audio chunk with fade-in / fade-out boundary artifacts, and
+    # the gap between calls is audible. For Deepgram's REST TTSService this
+    # is fundamentally broken — it cannot produce smooth audio one token at
+    # a time. Sarvam's streaming WebSocket happens to handle it better but
+    # we want consistent behavior across providers.
+    #
+    # Net trade: ~300ms higher first-audio latency in exchange for fluent
+    # speech. Choppy audio is unusable; the latency hit is acceptable. A
+    # follow-up can adopt Deepgram's Aura-2 streaming WebSocket for true
+    # incremental TTS without the boundary artifacts.
     deepgram_tts = DeepgramTTSService(
         api_key=settings.lumo_deepgram_api_key,
         voice=settings.voice_tts_voice,
         sample_rate=settings.voice_tts_sample_rate,
         encoding=settings.voice_tts_encoding,
-        aggregate_sentences=False,
+        aggregate_sentences=True,
     )
     sarvam_tts = SarvamTTSService(
         api_key=settings.sarvam_api_key,
@@ -559,7 +577,7 @@ async def run_daily_voice_pipeline(
         speaker=settings.voice_sarvam_tts_speaker,
         sample_rate=settings.voice_tts_sample_rate,
         output_audio_codec=settings.voice_tts_encoding,
-        aggregate_sentences=False,
+        aggregate_sentences=True,
     )
     tts = ParallelPipeline(
         [
