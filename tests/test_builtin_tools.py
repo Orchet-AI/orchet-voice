@@ -245,7 +245,7 @@ async def test_web_search_truncates_very_long_results(
 # ----- public registry exposes the right names ----------------------
 
 
-def test_builtin_registry_lists_all_four_tools() -> None:
+def test_builtin_registry_lists_expected_tools() -> None:
     """Voice tool catalog and the registry must be in sync — if you
     add a schema in tool_catalog.py without registering a handler
     here, the LLM will call into thin air."""
@@ -254,6 +254,8 @@ def test_builtin_registry_lists_all_four_tools() -> None:
         "current_date",
         "current_weather",
         "web_search",
+        "marketplace_find_agents",
+        "marketplace_install_agent",
     }
 
 
