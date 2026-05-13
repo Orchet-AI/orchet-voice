@@ -66,6 +66,7 @@ from voice.routing.region_router import (
 )
 from voice.settings import Settings
 from voice.tool_catalog import VOICE_FUNCTION_SCHEMAS, VOICE_TOOLS_SCHEMA
+from voice.tools.builtin_tools import BUILTIN_TOOL_HANDLERS
 from voice.voice_turn_dispatcher import VoiceTurnDispatcher
 
 logger = structlog.get_logger()
@@ -809,6 +810,26 @@ def register_voice_tools(
     dispatcher: Any,
     transport_output: object,
 ) -> None:
+    """Wire every tool the LLM might call.
+
+    Two execution paths:
+
+    * **Built-in tools** (``current_time``, ``current_date``,
+      ``current_weather``, ``web_search``) — handled locally in the
+      voice service via ``voice/tools/builtin_tools.py``. No
+      ``/voice/turn`` round-trip, no orchet-backend dependency, answer
+      in milliseconds.
+
+    * **Backend tools** (Gmail, Calendar, Spotify, Duffel, etc.) —
+      dispatched through the ``VoiceTurnDispatcher`` to
+      orchet-backend's ``/voice/turn`` endpoint where the full MCP
+      catalog lives.
+
+    The LLM doesn't know the difference — it sees one flat tool list
+    from ``VOICE_TOOLS_SCHEMA``. The split is purely an implementation
+    detail of where each tool actually runs.
+    """
+
     async def handler(
         function_name: str,
         tool_call_id: str,
@@ -818,9 +839,30 @@ def register_voice_tools(
         result_callback: Callable[..., Awaitable[None]],
     ) -> None:
         del tool_call_id, context
+        args = arguments if isinstance(arguments, dict) else {}
+
+        # ----- Built-in fast path ---------------------------------------
+        local_handler = BUILTIN_TOOL_HANDLERS.get(function_name)
+        if local_handler is not None:
+            try:
+                result = await local_handler(args)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "voice.tools.builtin_handler_failed",
+                    function=function_name,
+                    error=str(exc)[:200],
+                )
+                result = {"error": f"{function_name} failed: {exc}"}
+            await result_callback(
+                result,
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
+            return
+
+        # ----- Backend dispatch -----------------------------------------
         outcome = await dispatcher.dispatch(
             function_name,
-            arguments if isinstance(arguments, dict) else {},
+            args,
             transport=transport_output,
         )
         if outcome.spoken_text:

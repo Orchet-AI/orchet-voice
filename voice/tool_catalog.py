@@ -9,6 +9,70 @@ def _string(description: str) -> dict[str, str]:
 
 
 VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
+    # ----- Built-in local tools (no orchet-backend round trip) -----
+    #
+    # These four cover the most common "Orchet doesn't have access to
+    # internet" complaints. They run inside the voice service itself via
+    # voice/tools/builtin_tools.py — see register_voice_tools for the
+    # short-circuit wiring.
+    FunctionSchema(
+        name="current_time",
+        description=(
+            "Get the current wall-clock time. Use this when the user asks "
+            "what time it is, when an event is happening relative to now, "
+            "or anything else that needs the current time."
+        ),
+        properties={
+            "timezone": _string(
+                "Optional IANA timezone name (e.g. 'Asia/Kolkata', "
+                "'America/Los_Angeles'). Defaults to UTC if omitted."
+            ),
+        },
+        required=[],
+    ),
+    FunctionSchema(
+        name="current_date",
+        description=(
+            "Get today's date. Use this when the user asks for today's "
+            "date, the day of the week, or anything else that needs the "
+            "current date."
+        ),
+        properties={
+            "timezone": _string(
+                "Optional IANA timezone name. Defaults to UTC if omitted."
+            ),
+        },
+        required=[],
+    ),
+    FunctionSchema(
+        name="current_weather",
+        description=(
+            "Get the current weather for a city, region, airport code, "
+            "or postcode. Use this whenever the user asks about weather, "
+            "temperature, or whether they need an umbrella."
+        ),
+        properties={
+            "location": _string(
+                "City name, region, airport code, or postcode. Required."
+            ),
+        },
+        required=["location"],
+    ),
+    FunctionSchema(
+        name="web_search",
+        description=(
+            "Search the web for current information. Use this for "
+            "questions about current events, news, recent facts, "
+            "definitions, sports scores, or anything you don't already "
+            "know with high confidence. Returns a short factual snippet "
+            "you can paraphrase for the user."
+        ),
+        properties={
+            "query": _string("Search query. Be specific."),
+        },
+        required=["query"],
+    ),
+    # ----- Backend-dispatched tools (route through /voice/turn) -----
     FunctionSchema(
         name="gmail_search_messages",
         description="Search the user's Gmail for messages matching a query.",
