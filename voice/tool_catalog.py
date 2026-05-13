@@ -73,6 +73,43 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
         required=["query"],
     ),
     # ----- Backend-dispatched tools (route through /voice/turn) -----
+    #
+    # ``agent_query`` is the path-B proxy: when the user asks a question
+    # that needs their connected apps / personal data / multi-step
+    # agentic reasoning, the voice LLM calls this with the user's full
+    # question as the query argument. The dispatcher forwards it to
+    # orchet-backend ``/voice/turn``, where the route handler
+    # special-cases the name "agent_query": it runs the full
+    # orchestrator loop (Claude Sonnet 4.6 with the chat surface's
+    # entire MCP tool catalog), accumulates the streamed text response,
+    # and returns it as ``voice_message_hint``. The voice service
+    # speaks that hint directly — the local voice LLM is bypassed for
+    # the answer so it doesn't paraphrase or re-process.
+    #
+    # Cost-shape note: this tool kicks off a full agentic turn on the
+    # backend (potentially many tool calls, multiple LLM rounds). The
+    # voice LLM should reach for it ONLY when the question genuinely
+    # needs backend access — not for "what's 2+2" or "tell me a joke".
+    FunctionSchema(
+        name="agent_query",
+        description=(
+            "Ask the full Orchet orchestrator to answer a question that "
+            "needs the user's connected apps (Gmail, Calendar, Drive, "
+            "Slack, etc.), personal data, multi-step reasoning, or any "
+            "capability not provided by the other voice tools. Use this "
+            "for things like 'what's on my calendar', 'did anyone email "
+            "me about X', 'pull up the design doc for Y', or any "
+            "open-ended question that touches user data. Pass the user's "
+            "full question verbatim as the query — do NOT pre-process it."
+        ),
+        properties={
+            "query": _string(
+                "The user's question, passed through verbatim. The "
+                "orchestrator handles parsing and tool selection."
+            ),
+        },
+        required=["query"],
+    ),
     FunctionSchema(
         name="gmail_search_messages",
         description="Search the user's Gmail for messages matching a query.",
