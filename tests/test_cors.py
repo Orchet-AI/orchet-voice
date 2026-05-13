@@ -46,6 +46,7 @@ def _client() -> TestClient:
                 voice_sarvam_tts_speaker="aditya",
                 voice_tts_sample_rate=24000,
                 voice_tts_encoding="linear16",
+                voice_deepgram_tts_mode="streaming",
             )
         )
     )

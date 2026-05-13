@@ -42,6 +42,7 @@ def settings() -> Settings:
         voice_tts_encoding="linear16",
         voice_sarvam_tts_model="bulbul:v3-beta",
         voice_sarvam_tts_speaker="aditya",
+        voice_deepgram_tts_mode="streaming",
     )
 
 
