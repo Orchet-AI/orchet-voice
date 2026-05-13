@@ -195,7 +195,7 @@ async def test_two_synthesize_calls_share_one_websocket() -> None:
     open_count = 0
     original_connect = module.websockets.connect
 
-    async def counting_connect(*args: Any, **kwargs: Any) -> FakeConnection:
+    async def counting_connect(*args: Any, **kwargs: Any) -> Any:
         nonlocal open_count
         open_count += 1
         return await original_connect(*args, **kwargs)
