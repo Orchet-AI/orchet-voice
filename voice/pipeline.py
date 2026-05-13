@@ -471,6 +471,38 @@ class LLMSpanProcessor(FrameProcessor):
         turn.llm_span.end()
 
 
+class MarkdownStripperProcessor(FrameProcessor):
+    """Strip markdown characters from LLM text before TTS reads them literally.
+
+    Deepgram (and Sarvam) TTS read `**` as "star star", `_` as "underscore",
+    and backticks as "backtick". Claude 4.5 defaults to markdown for
+    emphasis even when the system prompt forbids it; relying on prompt
+    instructions alone leaves "I'm star star sure star star" leaking
+    into the audio. We strip the markdown chars deterministically right
+    before TTS so the user hears clean prose regardless of model drift.
+
+    LLM text streams in token fragments (e.g. "**" might come as two
+    separate "*" chunks), so multi-char regex patterns aren't reliable
+    on a per-frame basis. Stripping the individual markdown chars
+    `*`, `_`, `` ` `` is equivalent in effect and works on every frame
+    in isolation, no aggregation required. Numbered list prefixes like
+    "1. " are left alone — TTS reads them naturally as "one,".
+    """
+
+    _STRIP_CHARS = str.maketrans("", "", "*_`")
+
+    def __init__(self) -> None:
+        super().__init__(name="orchet-markdown-stripper")
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, LLMTextFrame) and frame.text:
+            cleaned = frame.text.translate(self._STRIP_CHARS)
+            if cleaned != frame.text:
+                frame.text = cleaned
+        await self.push_frame(frame, direction)
+
+
 class TTSSpanProcessor(FrameProcessor):
     def __init__(
         self,
