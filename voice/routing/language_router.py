@@ -25,6 +25,7 @@ from pipecat.frames.frames import (
 )
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.services.anthropic import AnthropicLLMContext
 
 from voice.pipeline import VoiceTurnTracker
 from voice.providers.stt_sarvam import (
@@ -393,12 +394,20 @@ class LanguagePromptProcessor(FrameProcessor):
         locale = self._tracker.locale
         if locale == self._last_locale:
             return
-        messages = self._context.get_messages()
         prompt = load_voice_prompt(locale)
-        if messages and messages[0].get("role") == "system":
-            messages[0]["content"] = prompt
+        # AnthropicLLMContext stores the system prompt in `self.system`,
+        # NOT as a {role: "system"} message in messages. Mutating
+        # messages here would inject a role=system entry that Anthropic
+        # rejects with HTTP 400. Detect the context shape and update
+        # the right slot.
+        if isinstance(self._context, AnthropicLLMContext):
+            self._context.system = prompt
         else:
-            messages.insert(0, {"role": "system", "name": "system", "content": prompt})
+            messages = self._context.get_messages()
+            if messages and messages[0].get("role") == "system":
+                messages[0]["content"] = prompt
+            else:
+                messages.insert(0, {"role": "system", "name": "system", "content": prompt})
         self._last_locale = locale
 
 

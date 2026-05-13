@@ -23,6 +23,7 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+from pipecat.services.anthropic import AnthropicLLMContext
 from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
@@ -623,9 +624,21 @@ async def run_daily_voice_pipeline(
     transport_output = transport.output()
     register_voice_tools(llm, dispatcher, transport_output)
 
-    context = OpenAILLMContext.from_messages(
-        [{"role": "system", "content": load_voice_prompt(metadata.locale)}]
-    )
+    # Build the right context shape for the configured LLM. Anthropic's
+    # Messages API requires the system prompt as a top-level `system`
+    # param, NOT as a {role: "system"} message inside `messages`. Pipecat's
+    # AnthropicLLMService crashes (HTTP 400) when it sees a role=system
+    # entry in messages — and the LanguagePromptProcessor below also
+    # injects one on locale changes if the context is OpenAI-shaped.
+    # Constructing AnthropicLLMContext directly with `system=...` puts
+    # the prompt where it belongs from turn 1 onward.
+    voice_prompt = load_voice_prompt(metadata.locale)
+    provider = llm_provider_for(llm)
+    context: OpenAILLMContext
+    if provider == "anthropic":
+        context = AnthropicLLMContext(messages=[], system=voice_prompt)
+    else:
+        context = OpenAILLMContext.from_messages([{"role": "system", "content": voice_prompt}])
     context.set_tools(VOICE_TOOLS_SCHEMA)
     context.set_tool_choice("auto")
     context_aggregator = llm.create_context_aggregator(
