@@ -163,6 +163,25 @@ class DeepgramStreamingTTSService(TTSService):
     def can_generate_metrics(self) -> bool:
         return True
 
+    async def prewarm(self) -> None:
+        """Open the Deepgram WebSocket now so the first synthesize() doesn't
+        pay the connect cost (typically 300-500ms) on the user-visible
+        latency path.
+
+        The persistent connection design already keeps the WS open across
+        turns ≥2 — but turn 1 was paying the connect cost from inside the
+        tool-use loop, landing it squarely on the mouth-to-ear budget.
+        Pipeline startup calls this in a background task; failures are
+        swallowed so a Deepgram outage doesn't block pipeline boot.
+        Subsequent synthesize() calls take the warm path via
+        _ensure_open_locked() since the connection is already open.
+
+        Failures are silently suppressed — the lazy reconnect path
+        stays available, we just lose the turn-1 latency win.
+        """
+        with contextlib.suppress(Exception):
+            await self._connection.prewarm()
+
     async def stop(self, frame: EndFrame) -> None:
         """Graceful pipeline shutdown — release the persistent WS."""
         try:
@@ -292,6 +311,14 @@ class _PersistentDeepgramTTSConnection:
         self._send_lock = asyncio.Lock()
         # Guards _connection state during open / reconnect.
         self._state_lock = asyncio.Lock()
+
+    async def prewarm(self) -> None:
+        """Open the WS up front so the first synthesize() call doesn't
+        pay the ~300-500ms TLS+WS-handshake cost on the user-visible
+        latency path. Safe to call multiple times; no-op once open.
+        """
+        async with self._send_lock:
+            await self._ensure_open_locked()
 
     async def synthesize(self, text: str) -> AsyncGenerator[Any, None]:
         """Send Speak + Flush, yield inbound frames until Flushed.

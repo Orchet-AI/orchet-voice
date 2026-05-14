@@ -74,9 +74,7 @@ def test_detect_language_sync_fallback_defaults_to_english() -> None:
         ("ja-JP", 0.0, "ja-JP"),
     ],
 )
-def test_override_weak_sarvam_to_english(
-    locale: str, confidence: float, expected: str
-) -> None:
+def test_override_weak_sarvam_to_english(locale: str, confidence: float, expected: str) -> None:
     assert override_weak_sarvam_to_english(locale, confidence) == expected
 
 
@@ -84,17 +82,9 @@ def test_override_threshold_is_exclusive_lower_bound() -> None:
     """Confidence exactly at the threshold should respect Sarvam (not
     override). Strictly-less-than semantics — the rule is 'when we
     don't have at least the threshold of confidence'."""
+    assert override_weak_sarvam_to_english("hi-IN", SARVAM_WEAK_CONFIDENCE_THRESHOLD) == "hi-IN"
     assert (
-        override_weak_sarvam_to_english(
-            "hi-IN", SARVAM_WEAK_CONFIDENCE_THRESHOLD
-        )
-        == "hi-IN"
-    )
-    assert (
-        override_weak_sarvam_to_english(
-            "hi-IN", SARVAM_WEAK_CONFIDENCE_THRESHOLD - 0.01
-        )
-        == "en-US"
+        override_weak_sarvam_to_english("hi-IN", SARVAM_WEAK_CONFIDENCE_THRESHOLD - 0.01) == "en-US"
     )
 
 
@@ -103,12 +93,6 @@ def test_override_respects_custom_threshold() -> None:
     threshold biases more aggressively to English; a looser threshold
     trusts Sarvam more."""
     # Stricter: even high-confidence Sarvam routes go to English.
-    assert (
-        override_weak_sarvam_to_english("hi-IN", 0.85, threshold=0.9)
-        == "en-US"
-    )
+    assert override_weak_sarvam_to_english("hi-IN", 0.85, threshold=0.9) == "en-US"
     # Looser: even very low Sarvam confidence is respected.
-    assert (
-        override_weak_sarvam_to_english("hi-IN", 0.1, threshold=0.05)
-        == "hi-IN"
-    )
+    assert override_weak_sarvam_to_english("hi-IN", 0.1, threshold=0.05) == "hi-IN"

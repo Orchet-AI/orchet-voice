@@ -202,18 +202,27 @@ class VoiceSessionManager:
         expires_at = int(time.time()) + ttl_seconds
 
         daily = self._daily_client()
+        # The room must exist before tokens can be issued against it,
+        # but the bot and client meeting tokens have no data dependency
+        # on each other — both just bind to room.name. Issuing them in
+        # parallel saves one transcontinental REST round-trip
+        # (~300-700ms) on every session-create, which lands directly on
+        # the user-perceived "Thinking → Listening" gap when they tap
+        # "Tap to talk".
         room = await daily.create_room(room_name, expires_at)
-        bot_token = await daily.create_meeting_token(
-            room.name,
-            expires_at,
-            is_owner=True,
-            user_name="Orchet Voice Bot",
-        )
-        client_token = await daily.create_meeting_token(
-            room.name,
-            expires_at,
-            is_owner=False,
-            user_name=user.email or user.user_id,
+        bot_token, client_token = await asyncio.gather(
+            daily.create_meeting_token(
+                room.name,
+                expires_at,
+                is_owner=True,
+                user_name="Orchet Voice Bot",
+            ),
+            daily.create_meeting_token(
+                room.name,
+                expires_at,
+                is_owner=False,
+                user_name=user.email or user.user_id,
+            ),
         )
 
         metadata = VoiceMetadata(
@@ -589,6 +598,14 @@ async def run_daily_voice_pipeline(
             encoding=settings.voice_tts_encoding,
             aggregate_sentences=False,
         )
+        # Open the Deepgram WebSocket in the background NOW so turn-1
+        # synthesize() doesn't pay the ~300-500ms connect cost on the
+        # user-visible mouth-to-ear path. The persistent connection
+        # design already smooths turns ≥2; this closes the cold-start
+        # hole. Fire-and-forget — pipeline boot is intentionally not
+        # blocked on Deepgram (an outage there shouldn't keep the room
+        # from connecting; lazy reconnect handles it).
+        asyncio.create_task(deepgram_tts.prewarm())
     # Sarvam Bulbul is also a streaming WS — same reasoning as the
     # Deepgram WS branch above. aggregate_sentences=True caused the 25 s
     # buffer regression; the streaming endpoint handles per-token text
