@@ -133,10 +133,7 @@ def override_weak_sarvam_to_english(
     Extracted as a pure helper so the override rule can be unit-tested
     without standing up the full LanguageDetectionProcessor pipeline.
     """
-    if (
-        pick_stt_provider(locale) == "sarvam"
-        and confidence < threshold
-    ):
+    if pick_stt_provider(locale) == "sarvam" and confidence < threshold:
         return "en-US"
     return locale
 
@@ -341,9 +338,7 @@ class LanguageDetectionProcessor(FrameProcessor):
         # Production repro 2026-05-14: 16 Kannada detections + ~30
         # Hindi/Tamil detections in 48h that were almost certainly
         # Indian-accented English getting misclassified.
-        overridden_locale = override_weak_sarvam_to_english(
-            locale, result.confidence
-        )
+        overridden_locale = override_weak_sarvam_to_english(locale, result.confidence)
         if overridden_locale != locale:
             logger.info(
                 "voice.language_detection_overridden_to_english",
