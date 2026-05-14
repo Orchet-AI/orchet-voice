@@ -57,14 +57,34 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
     FunctionSchema(
         name="web_search",
         description=(
-            "Search the web for current information. Use this for "
-            "questions about current events, news, recent facts, "
-            "definitions, sports scores, or anything you don't already "
-            "know with high confidence. Returns a short factual snippet "
-            "you can paraphrase for the user."
+            "Search the open internet for a short factual answer. This "
+            "is your PRIMARY tool for any public-information question.\n\n"
+            "ALWAYS use web_search (NOT agent_query) for:\n"
+            "  - News and current events: 'what's the latest on X', "
+            "'what happened today', 'any news about Y'.\n"
+            "  - Public facts: 'what is X', 'who is X', 'when did X', "
+            "'how does X work', 'where is X', 'how tall is X', anything "
+            "you'd type into Google to answer.\n"
+            "  - Stock prices, sports scores, election results, weather "
+            "for places current_weather doesn't cover.\n"
+            "  - Definitions, etymology, history, science explanations "
+            "you don't already know cold.\n"
+            "  - Reviews, opinions, what people think about public "
+            "entities, products, places.\n"
+            "  - 'Search the web for X', 'Google X', 'look up X', "
+            "'check the internet about X' — explicit user asks.\n\n"
+            "Do NOT route these through agent_query. agent_query is for "
+            "Orchet-internal questions and the user's connected apps "
+            "(Gmail / Calendar / Drive / memory). For 'what's the news' "
+            "ALWAYS use web_search — NEVER say 'I don't have internet' "
+            "or 'I can't browse the web'. You CAN browse — via this "
+            "tool.\n\n"
+            "Pass the user's question verbatim as the query. Be "
+            "specific. Returns a short factual snippet you can "
+            "paraphrase for the user."
         ),
         properties={
-            "query": _string("Search query. Be specific."),
+            "query": _string("Search query — pass the user's question verbatim."),
         },
         required=["query"],
     ),
@@ -89,10 +109,12 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
     FunctionSchema(
         name="agent_query",
         description=(
-            "Your escape hatch into Orchet's full backend. Use this for "
-            "ANY question you cannot answer with one of your other "
-            "tools. This is the DEFAULT — when in doubt, call this "
-            "instead of saying you don't have access.\n\n"
+            "Your escape hatch into Orchet's full backend. This is "
+            "ONLY for Orchet-internal questions and personal/connected-"
+            "app questions. For public internet facts, news, or "
+            "definitions, prefer web_search FIRST — agent_query is "
+            "expensive and slow, only reach for it when the user's "
+            "question genuinely needs the orchestrator's backend.\n\n"
             "ALWAYS route through agent_query when the user asks about:\n"
             "  - Orchet itself: the marketplace, available agents, "
             "account, billing, plugins, settings, what Orchet can do.\n"
@@ -106,8 +128,6 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
             "Drive, Notion, Linear, GitHub, Slack threads, etc.\n"
             "  - Multi-step or agentic work, planning, research, "
             "anything that needs reasoning across multiple data sources.\n"
-            "  - Any open-ended question or anything you're unsure how "
-            "to handle directly.\n"
             "  - Anything the user TELLS YOU about themselves that they "
             "want you to remember — their name, where they live, what "
             "they prefer, allergies, frequent destinations, family "
