@@ -71,7 +71,7 @@ class Settings:
             voice_stt_endpointing_ms=_int_env("ORCHET_VOICE_STT_ENDPOINTING_MS", 300),
             voice_sarvam_stt_model=os.getenv("ORCHET_VOICE_SARVAM_STT_MODEL", "saarika:v2.5"),
             voice_language_detection_seconds=_float_env(
-                "ORCHET_VOICE_LANGUAGE_DETECTION_SECONDS", 2.0
+                "ORCHET_VOICE_LANGUAGE_DETECTION_SECONDS", 0.75
             ),
             voice_llm_model=os.getenv("ORCHET_VOICE_LLM_MODEL", "llama-3.3-70b-versatile"),
             voice_anthropic_model=os.getenv("ORCHET_VOICE_ANTHROPIC_MODEL", "claude-sonnet-4-6"),

@@ -44,6 +44,28 @@ ENGLISH_LOCALES = {"en", "en-US", "en-GB", "en-IN"}
 ENGLISH_SHORTCUT_CONFIDENCE: float = 0.75
 ENGLISH_SHORTCUT_WINDOW_MS: int = 500
 
+# Below this confidence, we treat a Sarvam-routed locale (Hindi /
+# Telugu / Tamil / Kannada / Punjabi / Malayalam / Gujarati / Bengali /
+# Marathi) as "Sarvam guessed" and override to en-US so the turn
+# routes to Deepgram instead.
+#
+# Why this number: Honeycomb 48h breakdown of 406 detections in bom
+# showed AVG(voice.detect.confidence) = 0 across ALL rows — Sarvam's
+# `unknown` mode isn't returning `language_probability`, so the
+# parser's `or 0.0` fallback fires on every detection. Setting the
+# threshold at 0.5 means: any non-English Sarvam result without a
+# real confidence signal gets defaulted to English. Legitimate
+# confident Hindi/Tamil/etc. speakers (confidence > 0.5, when Sarvam
+# actually returns one) still route correctly to Sarvam. The
+# tradeoff biases toward false-negative routing to Sarvam, which
+# is the correct tradeoff for our user base (heavy Indian-accented
+# English in test traffic). If a legitimate Hindi speaker gets
+# misrouted to Deepgram, Deepgram's English model will produce
+# garbled transcription and they can retry — vs. the current
+# state, where Indian-accented English speakers get unintelligible
+# Sarvam Kannada/Punjabi transcription with no recovery path.
+SARVAM_WEAK_CONFIDENCE_THRESHOLD: float = 0.5
+
 
 @dataclass(frozen=True)
 class LanguageDetectionResult:
@@ -100,6 +122,25 @@ def sarvam_locale_for(detected: str) -> str:
     return locale if locale in SARVAM_ROUTED_LOCALES else "hi-IN"
 
 
+def override_weak_sarvam_to_english(
+    locale: str,
+    confidence: float,
+    *,
+    threshold: float = SARVAM_WEAK_CONFIDENCE_THRESHOLD,
+) -> str:
+    """If `locale` would route to Sarvam AND `confidence` is below
+    `threshold`, return "en-US"; otherwise return the input unchanged.
+    Extracted as a pure helper so the override rule can be unit-tested
+    without standing up the full LanguageDetectionProcessor pipeline.
+    """
+    if (
+        pick_stt_provider(locale) == "sarvam"
+        and confidence < threshold
+    ):
+        return "en-US"
+    return locale
+
+
 def load_voice_prompt(locale: str, *, prompt_dir: Path = PROMPT_DIR) -> str:
     normalized = normalize_locale(locale)
     suffix = normalized.split("-", maxsplit=1)[0]
@@ -117,8 +158,13 @@ class SarvamStreamingLanguageDetector:
         *,
         api_key: str,
         model: str = DEFAULT_SARVAM_STT_MODEL,
-        timeout_seconds: float = 4.0,
+        timeout_seconds: float = 1.5,
     ):
+        # Default lowered 4.0 → 1.5 on 2026-05-14: Honeycomb showed 50%
+        # of detections were timing out at the old 4s cap, bleeding 4s
+        # of mouth-to-ear on every stall. Sarvam's actual successful
+        # response time is 400-800ms (p50 ~660ms) — 1.5s is comfortably
+        # above that and cuts the tail-latency cost of a stall by ~62%.
         self._api_key = api_key
         self._model = model
         self._timeout_seconds = timeout_seconds
@@ -192,9 +238,15 @@ class LanguageDetectionProcessor(FrameProcessor):
         detector: AsyncLanguageDetector,
         sarvam_tts_speaker: str,
         deepgram_tts_voice: str,
-        detection_seconds: float = 2.0,
+        detection_seconds: float = 0.75,
         on_locale_detected: Callable[[str], None] | None = None,
     ):
+        # Default lowered 2.0 → 0.75 on 2026-05-14. Sarvam's `unknown`
+        # mode can decide on less audio than we were giving it; the
+        # extra 1.25s of buffering just delayed the user. 0.75s is
+        # enough for a short greeting like "what time is it" to flow
+        # through to STT without the mid-utterance pause that 2s
+        # introduced when speech outran the buffer.
         super().__init__(name="orchet-language-detection-router")
         self._tracker = tracker
         self._detector = detector
@@ -277,6 +329,40 @@ class LanguageDetectionProcessor(FrameProcessor):
                 elapsed_ms=_elapsed_ms(started),
             )
         locale = normalize_locale(result.locale)
+        # Bias toward English on weak Sarvam signal. If Sarvam returned
+        # a Sarvam-routed locale (Hindi/Telugu/Tamil/etc.) AND we don't
+        # have a confidence > SARVAM_WEAK_CONFIDENCE_THRESHOLD, override
+        # to en-US. Honeycomb showed Sarvam's `unknown` mode returns 0
+        # confidence on every detection (it doesn't ship
+        # language_probability values), so this effectively says
+        # "treat all uncertain non-English detections as English".
+        # Legitimate Hindi/Tamil speakers with a real confidence
+        # signal (when Sarvam ships one) still route to Sarvam.
+        # Production repro 2026-05-14: 16 Kannada detections + ~30
+        # Hindi/Tamil detections in 48h that were almost certainly
+        # Indian-accented English getting misclassified.
+        overridden_locale = override_weak_sarvam_to_english(
+            locale, result.confidence
+        )
+        if overridden_locale != locale:
+            logger.info(
+                "voice.language_detection_overridden_to_english",
+                detected_locale=locale,
+                detected_confidence=result.confidence,
+                detector_provider=result.provider,
+                threshold=SARVAM_WEAK_CONFIDENCE_THRESHOLD,
+            )
+            locale = overridden_locale
+            # Record the original signal as the provider hint so
+            # Honeycomb breakdowns by voice.detect.provider can
+            # distinguish "we got en-US because Sarvam said so" vs
+            # "we got en-US because we overrode Sarvam's guess".
+            result = LanguageDetectionResult(
+                locale=locale,
+                confidence=result.confidence,
+                provider=f"{result.provider}-overridden",
+                elapsed_ms=result.elapsed_ms,
+            )
         stt_provider = pick_stt_provider(locale)
         tts_provider = pick_tts_provider(locale)
         voice_id = (
