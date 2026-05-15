@@ -238,7 +238,28 @@ class VoiceTurnDispatcher:
 
     def _client(self) -> httpx.AsyncClient:
         if not self._http_client:
-            self._http_client = httpx.AsyncClient(base_url=self._gateway_url, timeout=5.0)
+            # Backend's /voice/turn runs the full Claude tool-use loop
+            # (often web_search + memory_recall + Anthropic streaming)
+            # and legitimately takes 5–25 s for agent_query routes.
+            # A flat 5 s timeout was firing on every non-trivial turn,
+            # leaving the voice pipeline with a partial response that
+            # came out as choppy / unintelligible audio.
+            #
+            # Split timeouts keep the connect / write / pool slots
+            # tight so a real backend outage still fails fast, but
+            # reads can absorb a slow Claude turn.
+            # Honeycomb 2026-05-15: voice.orchestrator.voice_turn
+            # p95 = 20 s, max = 26.6 s. 30 s read budget covers that
+            # with margin; beyond 30 s the user has given up anyway.
+            self._http_client = httpx.AsyncClient(
+                base_url=self._gateway_url,
+                timeout=httpx.Timeout(
+                    connect=2.0,
+                    read=30.0,
+                    write=10.0,
+                    pool=5.0,
+                ),
+            )
         return self._http_client
 
 
