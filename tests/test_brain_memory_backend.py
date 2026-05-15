@@ -93,8 +93,10 @@ async def test_happy_path_decodes_backend_response(gateway_url: str, internal_to
     # Auth header forwarded; user_id present in body.
     assert "/voice/session-context" in captured["url"]
     assert captured["auth"] == f"Bearer {internal_token}"
-    assert '"user_id": "u-1"' in captured["body"]
-    assert '"voice_session_id": "sess-1"' in captured["body"]
+    # httpx serializes JSON with separators=(',', ':') by default — no
+    # spaces — so the substring assertion must match that form.
+    assert '"user_id":"u-1"' in captured["body"]
+    assert '"voice_session_id":"sess-1"' in captured["body"]
 
 
 @pytest.mark.asyncio
