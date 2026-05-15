@@ -49,8 +49,10 @@ class Settings:
     # Used for the Phase 1 session-context fetch and any future direct
     # brain calls. When unset the BrainMemoryAdapter fails open and
     # voice falls back to the base locale prompt.
-    orchet_ml_brain_url: str
-    lumo_ml_service_jwt_secret: str
+    # Defaulted so the existing dataclass call sites (tests, conftest)
+    # don't need updating; production env reads override via from_env.
+    orchet_ml_brain_url: str = ""
+    lumo_ml_service_jwt_secret: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
