@@ -19,6 +19,7 @@ dependencies = [
   "structlog>=24.4",
   "httpx>=0.28",
   "pydantic>=2.9",
+  "PyJWT>=2.9",
 ]
 
 [dependency-groups]

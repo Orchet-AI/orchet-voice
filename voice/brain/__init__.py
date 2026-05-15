@@ -21,8 +21,8 @@ Design intent:
 """
 
 from voice.brain.memory_backend import (
-    BackendMemoryAdapter,
-    create_backend_memory_adapter,
+    BrainMemoryAdapter,
+    create_brain_memory_adapter,
 )
 from voice.brain.memory_port import (
     MemoryPort,
@@ -32,6 +32,6 @@ from voice.brain.memory_port import (
 __all__ = [
     "MemoryPort",
     "SessionContext",
-    "BackendMemoryAdapter",
-    "create_backend_memory_adapter",
+    "BrainMemoryAdapter",
+    "create_brain_memory_adapter",
 ]
