@@ -45,6 +45,14 @@ class Settings:
     # Kept as a kill-switch so we can roll back without redeploy if the
     # streaming adapter misbehaves in production.
     voice_deepgram_tts_mode: str
+    # Brain (orchet-brain on Modal) — direct URL + shared JWT secret.
+    # Used for the Phase 1 session-context fetch and any future direct
+    # brain calls. When unset the BrainMemoryAdapter fails open and
+    # voice falls back to the base locale prompt.
+    # Defaulted so the existing dataclass call sites (tests, conftest)
+    # don't need updating; production env reads override via from_env.
+    orchet_ml_brain_url: str = ""
+    lumo_ml_service_jwt_secret: str = ""
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -84,6 +92,9 @@ class Settings:
             voice_sarvam_tts_model=os.getenv("ORCHET_VOICE_SARVAM_TTS_MODEL", "bulbul:v3-beta"),
             voice_sarvam_tts_speaker=os.getenv("ORCHET_VOICE_SARVAM_TTS_SPEAKER", "aditya"),
             voice_deepgram_tts_mode=os.getenv("ORCHET_VOICE_DEEPGRAM_TTS_MODE", "streaming"),
+            orchet_ml_brain_url=os.getenv("ORCHET_ML_BRAIN_URL", "")
+            or os.getenv("LUMO_ML_AGENT_URL", ""),
+            lumo_ml_service_jwt_secret=os.getenv("LUMO_ML_SERVICE_JWT_SECRET", ""),
         )
 
     @property

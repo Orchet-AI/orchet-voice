@@ -32,7 +32,7 @@ from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
 from voice.auth import AuthenticatedUser
-from voice.brain import create_backend_memory_adapter
+from voice.brain import create_brain_memory_adapter
 from voice.internal_auth import sign_voice_service_jwt
 from voice.obs.cost import VoiceSessionCostTracker, set_cost_span_attributes
 from voice.obs.tracing import get_tracer
@@ -779,17 +779,16 @@ async def _fetch_user_context_safely(
     work. Honeycomb attributes match the per-turn injection on
     /turn (voice.context.*) so existing dashboards work unchanged.
     """
-    if not settings.gateway_url or not settings.internal_token:
+    if not settings.orchet_ml_brain_url or not settings.lumo_ml_service_jwt_secret:
+        # Brain URL or JWT secret not configured — fail open silently.
+        # Voice still starts; base locale prompt remains the contract.
         return None
     if not metadata.user_id or metadata.user_id == "anon":
         return None
 
-    adapter = create_backend_memory_adapter(
-        gateway_url=settings.gateway_url,
-        internal_token=sign_voice_service_jwt(
-            settings,
-            subject=metadata.user_id,
-        ),
+    adapter = create_brain_memory_adapter(
+        brain_url=settings.orchet_ml_brain_url,
+        jwt_secret=settings.lumo_ml_service_jwt_secret,
     )
     started = time.perf_counter()
     try:

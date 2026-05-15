@@ -1,4 +1,4 @@
-"""Tests for voice.brain.memory_backend.BackendMemoryAdapter.
+"""Tests for voice.brain.memory_backend.BrainMemoryAdapter.
 
 Locks in the fail-open contract — the adapter MUST return an empty
 SessionContext on any failure mode (network error, HTTP 4xx/5xx, body
@@ -17,43 +17,42 @@ from typing import Any
 import httpx
 import pytest
 
-from voice.brain.memory_backend import BackendMemoryAdapter
+from voice.brain.memory_backend import BrainMemoryAdapter
 from voice.brain.memory_port import SessionContext
 
 
 @pytest.fixture
-def gateway_url() -> str:
-    return "https://api.orchet.ai"
+def brain_url() -> str:
+    return "https://brain.example.modal.run"
 
 
 @pytest.fixture
-def internal_token() -> str:
-    return "test-token"
+def jwt_secret() -> str:
+    return "test-secret-not-validated-by-mock"
 
 
 def _adapter_with_handler(
-    gateway_url: str,
-    internal_token: str,
+    brain_url: str,
+    jwt_secret: str,
     handler: httpx.MockTransport | None = None,
-) -> BackendMemoryAdapter:
+) -> BrainMemoryAdapter:
     """Build an adapter wired to an in-memory MockTransport so tests
-    never hit a real network. The transport gets injected via a
-    pre-constructed AsyncClient (Adapter owns is False)."""
+    never hit a real network."""
     client = httpx.AsyncClient(
-        base_url=gateway_url,
+        base_url=brain_url,
         transport=handler,
         timeout=2.0,
     )
-    return BackendMemoryAdapter(
-        gateway_url=gateway_url,
-        internal_token=internal_token,
+    return BrainMemoryAdapter(
+        brain_url=brain_url,
+        jwt_secret=jwt_secret,
         http_client=client,
         timeout_s=2.0,
     )
 
 
 @pytest.mark.asyncio
-async def test_happy_path_decodes_backend_response(gateway_url: str, internal_token: str) -> None:
+async def test_happy_path_decodes_backend_response(brain_url: str, jwt_secret: str) -> None:
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -70,9 +69,7 @@ async def test_happy_path_decodes_backend_response(gateway_url: str, internal_to
             },
         )
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(
             user_id="u-1",
@@ -90,18 +87,21 @@ async def test_happy_path_decodes_backend_response(gateway_url: str, internal_to
     assert ctx.partial is False
     assert ctx.has_content is True
 
-    # Auth header forwarded; user_id present in body.
-    assert "/voice/session-context" in captured["url"]
-    assert captured["auth"] == f"Bearer {internal_token}"
-    # httpx serializes JSON with separators=(',', ':') by default — no
-    # spaces — so the substring assertion must match that form.
+    # Endpoint + auth shape: brain mints a fresh JWT per call.
+    assert "/memory/session-context" in captured["url"]
+    assert captured["auth"].startswith("Bearer ")
+    # The token is a JWT (3 dot-separated segments); we don't decode it
+    # here — the per-claim shape is locked in by brain's auth.py tests.
+    bearer = captured["auth"].removeprefix("Bearer ")
+    assert bearer.count(".") == 2
+    # httpx serializes JSON with separators=(',', ':') by default.
     assert '"user_id":"u-1"' in captured["body"]
     assert '"voice_session_id":"sess-1"' in captured["body"]
 
 
 @pytest.mark.asyncio
 async def test_empty_user_id_returns_empty_context_without_request(
-    gateway_url: str, internal_token: str
+    brain_url: str, jwt_secret: str
 ) -> None:
     called = False
 
@@ -110,9 +110,7 @@ async def test_empty_user_id_returns_empty_context_without_request(
         called = True
         return httpx.Response(200, json={})
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="")
     finally:
@@ -125,7 +123,7 @@ async def test_empty_user_id_returns_empty_context_without_request(
 
 @pytest.mark.asyncio
 async def test_anon_user_returns_empty_context_without_request(
-    gateway_url: str, internal_token: str
+    brain_url: str, jwt_secret: str
 ) -> None:
     called = False
 
@@ -134,9 +132,7 @@ async def test_anon_user_returns_empty_context_without_request(
         called = True
         return httpx.Response(200, json={})
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="anon")
     finally:
@@ -147,15 +143,11 @@ async def test_anon_user_returns_empty_context_without_request(
 
 
 @pytest.mark.asyncio
-async def test_http_500_returns_empty_context_no_exception(
-    gateway_url: str, internal_token: str
-) -> None:
+async def test_http_500_returns_empty_context_no_exception(brain_url: str, jwt_secret: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "boom"})
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="u-1")
     finally:
@@ -171,15 +163,11 @@ async def test_http_500_returns_empty_context_no_exception(
 
 
 @pytest.mark.asyncio
-async def test_http_400_returns_empty_context_no_exception(
-    gateway_url: str, internal_token: str
-) -> None:
+async def test_http_400_returns_empty_context_no_exception(brain_url: str, jwt_secret: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(400, json={"system_message": None, "facts_count": 0})
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="u-1")
     finally:
@@ -190,14 +178,12 @@ async def test_http_400_returns_empty_context_no_exception(
 
 @pytest.mark.asyncio
 async def test_network_error_returns_empty_context_no_exception(
-    gateway_url: str, internal_token: str
+    brain_url: str, jwt_secret: str
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("connection refused")
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="u-1")
     finally:
@@ -208,21 +194,19 @@ async def test_network_error_returns_empty_context_no_exception(
 
 
 @pytest.mark.asyncio
-async def test_timeout_returns_empty_context_no_exception(
-    gateway_url: str, internal_token: str
-) -> None:
+async def test_timeout_returns_empty_context_no_exception(brain_url: str, jwt_secret: str) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         await asyncio.sleep(1.0)
         return httpx.Response(200, json={"facts_count": 0})
 
     client = httpx.AsyncClient(
-        base_url=gateway_url,
+        base_url=brain_url,
         transport=httpx.MockTransport(handler),
         timeout=10.0,
     )
-    adapter = BackendMemoryAdapter(
-        gateway_url=gateway_url,
-        internal_token=internal_token,
+    adapter = BrainMemoryAdapter(
+        brain_url=brain_url,
+        jwt_secret=jwt_secret,
         http_client=client,
         timeout_s=0.05,
     )
@@ -236,14 +220,12 @@ async def test_timeout_returns_empty_context_no_exception(
 
 @pytest.mark.asyncio
 async def test_malformed_json_returns_empty_context_no_exception(
-    gateway_url: str, internal_token: str
+    brain_url: str, jwt_secret: str
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"not json")
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="u-1")
     finally:
@@ -253,7 +235,7 @@ async def test_malformed_json_returns_empty_context_no_exception(
 
 
 @pytest.mark.asyncio
-async def test_partial_flag_propagates(gateway_url: str, internal_token: str) -> None:
+async def test_partial_flag_propagates(brain_url: str, jwt_secret: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -266,9 +248,7 @@ async def test_partial_flag_propagates(gateway_url: str, internal_token: str) ->
             },
         )
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="u-1")
     finally:
@@ -281,7 +261,7 @@ async def test_partial_flag_propagates(gateway_url: str, internal_token: str) ->
 
 @pytest.mark.asyncio
 async def test_string_with_only_whitespace_treated_as_empty(
-    gateway_url: str, internal_token: str
+    brain_url: str, jwt_secret: str
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -294,9 +274,7 @@ async def test_string_with_only_whitespace_treated_as_empty(
             },
         )
 
-    adapter = _adapter_with_handler(
-        gateway_url, internal_token, handler=httpx.MockTransport(handler)
-    )
+    adapter = _adapter_with_handler(brain_url, jwt_secret, handler=httpx.MockTransport(handler))
     try:
         ctx = await adapter.get_session_context(user_id="u-1")
     finally:
