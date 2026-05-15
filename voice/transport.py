@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 import time
 from collections.abc import Awaitable, Callable
@@ -31,6 +32,7 @@ from pipecat.services.deepgram import DeepgramSTTService, DeepgramTTSService
 from pipecat.transports.services.daily import DailyParams, DailyTransport
 
 from voice.auth import AuthenticatedUser
+from voice.brain import create_backend_memory_adapter
 from voice.internal_auth import sign_voice_service_jwt
 from voice.obs.cost import VoiceSessionCostTracker, set_cost_span_attributes
 from voice.obs.tracing import get_tracer
@@ -683,6 +685,21 @@ async def run_daily_voice_pipeline(
     # Constructing AnthropicLLMContext directly with `system=...` puts
     # the prompt where it belongs from turn 1 onward.
     voice_prompt = load_voice_prompt(metadata.locale)
+
+    # Phase 1 of the Brain-for-voice initiative: fetch the user's
+    # USER CONTEXT block (profile + recent facts, pre-rendered by
+    # orchet-backend) and append to the locale prompt before the LLM
+    # context is constructed. Fail-open at 500ms — a slow Brain
+    # produces a session that knows less, never one that won't start.
+    # See ADR-013 + docs/strategy/BRAIN-FOR-VOICE.md.
+    user_context_message = await _fetch_user_context_safely(
+        settings=settings,
+        metadata=metadata,
+        tracker=tracker,
+    )
+    if user_context_message:
+        voice_prompt = f"{voice_prompt}\n\n{user_context_message}"
+
     provider = llm_provider_for(llm)
     context: OpenAILLMContext
     if provider == "anthropic":
@@ -740,6 +757,88 @@ async def run_daily_voice_pipeline(
         )
         session_span.end()
         await dispatcher.aclose()
+
+
+async def _fetch_user_context_safely(
+    *,
+    settings: Settings,
+    metadata: VoiceMetadata,
+    tracker: VoiceTurnTracker,
+) -> str | None:
+    """Phase 1 of Brain-for-voice: pull the user's USER CONTEXT block
+    from orchet-backend POST /voice/session-context and return the
+    pre-rendered system-prompt slice for appending to the locale
+    prompt.
+
+    Fail-open at every layer — a misconfigured / unreachable / slow
+    backend produces a session with no user context, never a session
+    that won't start. The base locale prompt remains the contract.
+
+    Telemetry lands on the session-total span when present so the
+    fetch latency rolls up alongside the rest of the session-start
+    work. Honeycomb attributes match the per-turn injection on
+    /turn (voice.context.*) so existing dashboards work unchanged.
+    """
+    if not settings.gateway_url or not settings.internal_token:
+        return None
+    if not metadata.user_id or metadata.user_id == "anon":
+        return None
+
+    adapter = create_backend_memory_adapter(
+        gateway_url=settings.gateway_url,
+        internal_token=sign_voice_service_jwt(
+            settings,
+            subject=metadata.user_id,
+        ),
+    )
+    started = time.perf_counter()
+    try:
+        ctx = await adapter.get_session_context(
+            user_id=metadata.user_id,
+            voice_session_id=metadata.voice_session_id,
+            agent_id=metadata.agent_id,
+            locale=metadata.locale,
+        )
+    except Exception as exc:  # noqa: BLE001
+        # Defense-in-depth — the adapter is already fail-open, but if
+        # it raises (e.g., misconfigured httpx) we still want the
+        # session to start.
+        logger.warning(
+            "voice.brain.memory.unexpected_error",
+            voice_session_id=metadata.voice_session_id,
+            error=str(exc)[:200],
+        )
+        with contextlib.suppress(Exception):
+            await adapter.aclose()  # type: ignore[attr-defined]
+        return None
+    finally:
+        # Single-shot use — close the underlying httpx client so we
+        # don't leak connections per session.
+        with contextlib.suppress(Exception):
+            await adapter.aclose()  # type: ignore[attr-defined]
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    turn = tracker.ensure_turn() if hasattr(tracker, "ensure_turn") else None
+    session_span = turn.total_span if turn and getattr(turn, "total_span", None) else None
+    if session_span is not None:
+        with contextlib.suppress(Exception):
+            session_span.set_attribute("voice.context.profile_loaded", ctx.profile_loaded)
+            session_span.set_attribute("voice.context.facts_count", ctx.facts_count)
+            session_span.set_attribute("voice.context.fetch_ms", elapsed_ms)
+            session_span.set_attribute("voice.context.server_compose_ms", ctx.elapsed_ms)
+            session_span.set_attribute("voice.context.partial", ctx.partial)
+
+    logger.info(
+        "voice.brain.memory.fetched",
+        voice_session_id=metadata.voice_session_id,
+        profile_loaded=ctx.profile_loaded,
+        facts_count=ctx.facts_count,
+        client_elapsed_ms=elapsed_ms,
+        server_elapsed_ms=ctx.elapsed_ms,
+        partial=ctx.partial,
+    )
+
+    return ctx.system_message if ctx.has_content else None
 
 
 def build_voice_pipeline_params(settings: Settings) -> PipelineParams:
