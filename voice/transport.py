@@ -819,19 +819,13 @@ async def _fetch_user_context_safely(
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
     turn = tracker.ensure_turn() if hasattr(tracker, "ensure_turn") else None
-    session_span = (
-        turn.total_span if turn and getattr(turn, "total_span", None) else None
-    )
+    session_span = turn.total_span if turn and getattr(turn, "total_span", None) else None
     if session_span is not None:
         with contextlib.suppress(Exception):
-            session_span.set_attribute(
-                "voice.context.profile_loaded", ctx.profile_loaded
-            )
+            session_span.set_attribute("voice.context.profile_loaded", ctx.profile_loaded)
             session_span.set_attribute("voice.context.facts_count", ctx.facts_count)
             session_span.set_attribute("voice.context.fetch_ms", elapsed_ms)
-            session_span.set_attribute(
-                "voice.context.server_compose_ms", ctx.elapsed_ms
-            )
+            session_span.set_attribute("voice.context.server_compose_ms", ctx.elapsed_ms)
             session_span.set_attribute("voice.context.partial", ctx.partial)
 
     logger.info(

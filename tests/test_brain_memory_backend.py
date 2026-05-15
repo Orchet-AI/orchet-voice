@@ -53,9 +53,7 @@ def _adapter_with_handler(
 
 
 @pytest.mark.asyncio
-async def test_happy_path_decodes_backend_response(
-    gateway_url: str, internal_token: str
-) -> None:
+async def test_happy_path_decodes_backend_response(gateway_url: str, internal_token: str) -> None:
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -253,9 +251,7 @@ async def test_malformed_json_returns_empty_context_no_exception(
 
 
 @pytest.mark.asyncio
-async def test_partial_flag_propagates(
-    gateway_url: str, internal_token: str
-) -> None:
+async def test_partial_flag_propagates(gateway_url: str, internal_token: str) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
