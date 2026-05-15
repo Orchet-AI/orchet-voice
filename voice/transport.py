@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -78,6 +79,29 @@ logger = structlog.get_logger()
 MIGRATION_VALID_FOR_SECONDS = 120
 OLD_SESSION_GRACE_SECONDS = 10
 INTERNAL_APP_NAME = "orchet-voice"
+
+# Pre-flight ack phrases — spoken via TTS the moment a backend
+# dispatch starts so the user hears the bot inside ~500ms instead of
+# waiting silently for the 5–25 s /voice/turn round-trip.
+#
+# Production 2026-05-15: user reported voice as "doing nothing" and
+# learned to greet ("Hey Orchet") because greetings hit the local
+# Haiku path (fast) while real questions hit agent_query (silent for
+# 20 s until the full backend response arrived). This pump primes
+# the audio channel so the latency stays invisible.
+#
+# Kept SHORT and natural — three to five syllables, contractions
+# only, no "please hold" / "let me see if I can find that" lengths.
+# The actual answer follows; the filler shouldn't compete for the
+# user's attention or pad the turn.
+_BACKEND_DISPATCH_ACK_PHRASES: tuple[str, ...] = (
+    "On it.",
+    "Let me check.",
+    "One sec.",
+    "Looking that up.",
+    "Hold on, checking.",
+    "Got it, give me a moment.",
+)
 
 
 @dataclass(frozen=True)
@@ -1048,6 +1072,26 @@ def register_voice_tools(
             return
 
         # ----- Backend dispatch -----------------------------------------
+        # Push an immediate spoken ack BEFORE the dispatch so the user
+        # hears the bot within ~500ms even when /voice/turn takes the
+        # full 20-25s for agent_query routes. Pipecat serializes TTS
+        # output, so the filler finishes before the actual answer
+        # plays — no overlap risk. The phrase is intentionally short
+        # (≤5 syllables) so it doesn't pad the turn when the backend
+        # comes back fast.
+        #
+        # Suppressed for snapshot_interrupted dispatches: those are
+        # background telemetry calls that the user is never waiting on,
+        # so an ack would be confusing. Today only the foreground tool
+        # path reaches this branch (via the LLM tool-call handler);
+        # any future caller that needs silent dispatch should call
+        # dispatcher.dispatch() directly, not through this handler.
+        ack_phrase = random.choice(_BACKEND_DISPATCH_ACK_PHRASES)
+        await service.push_frame(
+            TTSTextFrame(ack_phrase),
+            FrameDirection.DOWNSTREAM,
+        )
+
         outcome = await dispatcher.dispatch(
             function_name,
             args,
