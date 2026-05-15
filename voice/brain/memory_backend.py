@@ -86,7 +86,7 @@ class BackendMemoryAdapter:
                 ),
                 timeout=self._timeout_s,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "voice.brain.memory.fetch_timeout",
                 user_id_redacted=_hash_user(user_id),

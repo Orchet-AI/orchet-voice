@@ -20,13 +20,13 @@ Design intent:
       start.
 """
 
-from voice.brain.memory_port import (
-    MemoryPort,
-    SessionContext,
-)
 from voice.brain.memory_backend import (
     BackendMemoryAdapter,
     create_backend_memory_adapter,
+)
+from voice.brain.memory_port import (
+    MemoryPort,
+    SessionContext,
 )
 
 __all__ = [
