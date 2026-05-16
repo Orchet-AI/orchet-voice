@@ -695,7 +695,6 @@ async def run_daily_voice_pipeline(
     user_context_message = await _fetch_user_context_safely(
         settings=settings,
         metadata=metadata,
-        tracker=tracker,
     )
     if user_context_message:
         voice_prompt = f"{voice_prompt}\n\n{user_context_message}"
@@ -763,7 +762,6 @@ async def _fetch_user_context_safely(
     *,
     settings: Settings,
     metadata: VoiceMetadata,
-    tracker: VoiceTurnTracker,
 ) -> str | None:
     """Phase 1 of Brain-for-voice: pull the user's USER CONTEXT block
     from orchet-backend POST /voice/session-context and return the
@@ -774,10 +772,15 @@ async def _fetch_user_context_safely(
     backend produces a session with no user context, never a session
     that won't start. The base locale prompt remains the contract.
 
-    Telemetry lands on the session-total span when present so the
-    fetch latency rolls up alongside the rest of the session-start
-    work. Honeycomb attributes match the per-turn injection on
-    /turn (voice.context.*) so existing dashboards work unchanged.
+    Telemetry lands on a dedicated `voice.context.fetch` span (not the
+    per-turn total_span). Two reasons: (1) turn.total_span is the
+    user-facing mouth-to-ear timer (#6 backlog) — context-fetch
+    attributes would distort the latency dashboards; (2) at session
+    start there is NO turn yet, so the previous code's
+    `tracker.ensure_turn()` side-effect was prematurely creating a
+    turn-#1 + total_span before the user even spoke. Honeycomb
+    attribute names (voice.context.*) are preserved so existing
+    dashboards keep working — they just live under a new span name.
     """
     if not settings.orchet_ml_brain_url or not settings.lumo_ml_service_jwt_secret:
         # Brain URL or JWT secret not configured — fail open silently.
@@ -817,15 +820,24 @@ async def _fetch_user_context_safely(
             await adapter.aclose()  # type: ignore[attr-defined]
 
     elapsed_ms = int((time.perf_counter() - started) * 1000)
-    turn = tracker.ensure_turn() if hasattr(tracker, "ensure_turn") else None
-    session_span = turn.total_span if turn and getattr(turn, "total_span", None) else None
-    if session_span is not None:
-        with contextlib.suppress(Exception):
-            session_span.set_attribute("voice.context.profile_loaded", ctx.profile_loaded)
-            session_span.set_attribute("voice.context.facts_count", ctx.facts_count)
-            session_span.set_attribute("voice.context.fetch_ms", elapsed_ms)
-            session_span.set_attribute("voice.context.server_compose_ms", ctx.elapsed_ms)
-            session_span.set_attribute("voice.context.partial", ctx.partial)
+    # Telemetry lands on a dedicated `voice.context.fetch` span rather
+    # than turn.total_span. Two reasons: (1) turn.total_span is the
+    # USER-FACING mouth-to-ear timer (#6 backlog) — polluting it with
+    # backend instrumentation distorts the latency dashboards; (2) a
+    # dedicated span is queryable in Honeycomb by name, doesn't fight
+    # for attribute namespace, and shows up as a child segment in the
+    # trace waterfall where it's actually useful for triage. Fail-open
+    # via suppress() — telemetry must never block voice session start.
+    with contextlib.suppress(Exception):
+        ctx_span = get_tracer().start_span("voice.context.fetch")
+        ctx_span.set_attribute("voice.session_id", metadata.voice_session_id)
+        ctx_span.set_attribute("voice.agent_id", metadata.agent_id)
+        ctx_span.set_attribute("voice.context.profile_loaded", ctx.profile_loaded)
+        ctx_span.set_attribute("voice.context.facts_count", ctx.facts_count)
+        ctx_span.set_attribute("voice.context.fetch_ms", elapsed_ms)
+        ctx_span.set_attribute("voice.context.server_compose_ms", ctx.elapsed_ms)
+        ctx_span.set_attribute("voice.context.partial", ctx.partial)
+        ctx_span.end()
 
     logger.info(
         "voice.brain.memory.fetched",
