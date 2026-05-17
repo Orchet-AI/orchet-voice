@@ -165,6 +165,66 @@ VOICE_FUNCTION_SCHEMAS: tuple[FunctionSchema, ...] = (
         },
         required=["query"],
     ),
+    # ----- Render on the user's screen (intent-gated) -----
+    #
+    # ``show_in_ui`` is the visual counterpart to ``agent_query``. The
+    # voice service speaks short answers; the chat thread renders rich
+    # cards (flight lists, search results, trip summaries, etc.).
+    # When the user explicitly asks to SEE something on screen, Haiku
+    # picks this tool. The voice service emits a ``voice_show_in_ui``
+    # Daily app-message; the web client receives it and dispatches the
+    # query through the normal chat /turn endpoint, which renders the
+    # rich UI in the chat thread.
+    #
+    # Behaviour contract: this tool is ADDITIVE to the spoken answer.
+    # Haiku should still produce a short voice acknowledgement ("Here
+    # are your flights — they're on your screen now") so the user
+    # knows the request landed. Do NOT use this when the user just
+    # wants a spoken answer — use agent_query for that.
+    FunctionSchema(
+        name="show_in_ui",
+        description=(
+            "Render results visually in the user's chat thread (cards, "
+            "lists, tables, maps). Use this ONLY when the user "
+            "explicitly asks to SEE something on screen. Trigger "
+            "phrases include:\n"
+            "  - 'show me ...', 'show it on my screen / phone / "
+            "laptop / tablet'\n"
+            "  - 'put it on the screen', 'display ...', 'render ...'\n"
+            "  - 'open it in the UI', 'show the list', 'show the "
+            "cards', 'show the options'\n"
+            "  - 'pull up ...', 'bring up ...' on a device\n\n"
+            "When NOT to use this:\n"
+            "  - User asks a question expecting a SPOKEN answer "
+            "('what time is it', 'tell me about X', 'how's the "
+            "weather'). Use current_time / current_weather / "
+            "agent_query as appropriate.\n"
+            "  - User asks for a single fact that is faster to speak "
+            "than to render ('what's the cheapest flight?'). Speak "
+            "it via agent_query.\n"
+            "  - Default answers — show_in_ui is the EXCEPTION, not "
+            "the default. agent_query is the default for non-trivial "
+            "questions.\n\n"
+            "Behaviour: the query is dispatched to the full chat "
+            "orchestrator (Claude Sonnet 4.6, full MCP tool catalog) "
+            "and the resulting cards render in the chat thread "
+            "alongside the conversation. Pass the user's original "
+            "request verbatim as the query — do NOT pre-process or "
+            "rephrase.\n\n"
+            "After calling, give the user a one-sentence verbal "
+            "acknowledgement ('Showing them on your screen', 'Here "
+            "are the options — they're on screen now'). Do not "
+            "repeat the contents aloud — the screen IS the answer."
+        ),
+        properties={
+            "query": _string(
+                "The user's full request, passed through verbatim. "
+                "The chat orchestrator handles tool selection and "
+                "card composition."
+            ),
+        },
+        required=["query"],
+    ),
     # ----- Voice-driven marketplace discovery + install -----
     #
     # When the user asks to do a task that needs an installable agent

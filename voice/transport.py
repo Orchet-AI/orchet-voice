@@ -1150,6 +1150,63 @@ def register_voice_tools(
         del tool_call_id, context
         args = arguments if isinstance(arguments, dict) else {}
 
+        # ----- show_in_ui: render-on-screen pass-through ----------------
+        # Intent-gated tool that hands the user's request off to the web
+        # client to dispatch through the normal chat /turn endpoint
+        # (which renders flight cards, search results, trip summaries,
+        # etc.). The voice service does NOT call orchet-backend here —
+        # it only emits a Daily app-message; the web client owns the
+        # /turn dispatch so the rendered cards land in the same chat
+        # thread the user is looking at. The tool result tells Haiku
+        # the request landed so it can speak a one-line ack.
+        if function_name == "show_in_ui":
+            raw_query = args.get("query")
+            query = raw_query.strip() if isinstance(raw_query, str) else ""
+            if not query:
+                await result_callback(
+                    {
+                        "error": (
+                            "show_in_ui requires a non-empty query — "
+                            "pass the user's full request verbatim."
+                        ),
+                    },
+                    properties=FunctionCallResultProperties(run_llm=True),
+                )
+                return
+            try:
+                await send_daily_app_message(
+                    transport_output,
+                    {
+                        "type": "voice_show_in_ui",
+                        "voice_session_id": metadata.voice_session_id,
+                        "query": query,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "voice.show_in_ui.emit_failed",
+                    voice_session_id=metadata.voice_session_id,
+                    error=str(exc)[:200],
+                )
+                await result_callback(
+                    {"error": f"show_in_ui transport failed: {exc}"},
+                    properties=FunctionCallResultProperties(run_llm=True),
+                )
+                return
+            await result_callback(
+                {
+                    "ok": True,
+                    "rendered_in": "chat_thread",
+                    "note": (
+                        "The chat thread is rendering the result. Give "
+                        "the user a one-sentence verbal acknowledgement "
+                        "and stop — do NOT read the results aloud."
+                    ),
+                },
+                properties=FunctionCallResultProperties(run_llm=True),
+            )
+            return
+
         # ----- Built-in fast path ---------------------------------------
         local_handler = BUILTIN_TOOL_HANDLERS.get(function_name)
         if local_handler is not None:

@@ -74,7 +74,12 @@ class Settings:
             otel_endpoint=os.getenv("LUMO_OTEL_ENDPOINT", ""),
             otel_headers=os.getenv("LUMO_OTEL_HEADERS", ""),
             honeycomb_api_key=os.getenv("ORCHET_HONEYCOMB_API_KEY", ""),
-            default_llm=os.getenv("ORCHET_VOICE_LLM_DEFAULT", "groq"),
+            # Defaults aligned with production: Claude Haiku 4.5 via
+            # Anthropic is the voice LLM. The env vars still override
+            # for staging / per-agent experiments; only the fallback
+            # changes here so local dev matches what's actually
+            # running in prod.
+            default_llm=os.getenv("ORCHET_VOICE_LLM_DEFAULT", "anthropic"),
             voice_stt_model=os.getenv("ORCHET_VOICE_STT_MODEL", "nova-3"),
             voice_stt_endpointing_ms=_int_env("ORCHET_VOICE_STT_ENDPOINTING_MS", 300),
             voice_sarvam_stt_model=os.getenv("ORCHET_VOICE_SARVAM_STT_MODEL", "saarika:v2.5"),
@@ -82,7 +87,7 @@ class Settings:
                 "ORCHET_VOICE_LANGUAGE_DETECTION_SECONDS", 0.75
             ),
             voice_llm_model=os.getenv("ORCHET_VOICE_LLM_MODEL", "llama-3.3-70b-versatile"),
-            voice_anthropic_model=os.getenv("ORCHET_VOICE_ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+            voice_anthropic_model=os.getenv("ORCHET_VOICE_ANTHROPIC_MODEL", "claude-haiku-4-5"),
             voice_openai_model=os.getenv("ORCHET_VOICE_OPENAI_MODEL", "gpt-4o-mini"),
             voice_llm_max_tokens=_int_env("ORCHET_VOICE_LLM_MAX_TOKENS", 250),
             voice_llm_temperature=_float_env("ORCHET_VOICE_LLM_TEMPERATURE", 0.7),
